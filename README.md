@@ -21,5 +21,9 @@ Processing: Pandas, NumPy, Regex
 
 Analysis: Seaborn, Matplotlib, OpenPyXL
 
+EDA Link: https://github.com/MeKrishnaKumar/InstaMart_Product_Analysis/blob/master/IndiaMart%20Product%20Data%20Analysis%20Coding.pdf
+InstaMart Product Data Analysis Summery Link: https://github.com/MeKrishnaKumar/InstaMart_Product_Analysis/blob/master/IndiaMart%20Product%20Data%20Analysis%20Summery.pdf
+
+
 <img width="1999" height="999" alt="Ploting" src="https://github.com/user-attachments/assets/84250097-4bf1-4e31-9846-6e249e674e71" />
 <img width="1009" height="525" alt="newplot" src="https://github.com/user-attachments/assets/98939728-70b4-4ae5-95db-f91ac9c374c2" />
