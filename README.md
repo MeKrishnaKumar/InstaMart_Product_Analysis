@@ -1,7 +1,7 @@
-*Role: Data Engineer 
-**Name: Krishna Kumar
+# Role: Data Engineer 
+# Name: Krishna Kumar
 
-Project Title: B2B Market Intelligence Pipeline (IndiaMART)
+# Project Title: B2B Market Intelligence Pipeline (IndiaMART)
 Overview
 This project creates an end-to-end Data Engineering pipeline designed to extract, process, and analyze unstructured product data from India’s largest B2B marketplace (IndiaMART). It automates the collection of critical market signals—including pricing, supplier ratings, and location data—to drive competitive intelligence.
 
