@@ -1,0 +1,122 @@
+function readImeshCookie(name) {
+    const cookies = document.cookie.split(';');
+
+    for (let i = 0; i < cookies.length; i++) {
+        const cookie = cookies[i].trim();
+        if (cookie.startsWith(name + '=')) {
+            return decodeURIComponent(cookie.substring(name.length + 1));
+        }
+    }
+    return null;
+}
+function getimeshparamVal(cookieStr, key) {
+    if (cookieStr !== "") {
+        let decodedStr = imeshcookieDecode(cookieStr);
+        let pattern = new RegExp(key + "=([^|&]*)");
+        let match = decodedStr.match(pattern);
+        if (match && match.length > 1) {
+            return match[1];
+        }
+    }
+}
+function imeshcookieDecode(cookie){
+    let decodestr = '';
+    try{
+        decodestr = decodeURIComponent(cookie);
+    }catch(e){
+        try{
+         decodestr = unescape(cookie);
+        }
+        catch(err){
+            decodestr = cookie; 
+        }
+    }
+    return decodestr;
+} 
+function getimeshname(fn, ln) {
+    let imeshName = "";
+
+    if (fn !== "" && ln !== "") {
+        imeshName = fn.charAt(0).toUpperCase() + ln.charAt(0).toUpperCase();
+    } else if (fn !== "" && ln === "") {
+        imeshName = fn.charAt(0).toUpperCase() + "***";
+    } else if (fn === "" && ln !== "") {
+        imeshName = ln.charAt(0).toUpperCase() + "***";
+    }
+
+    return imeshName;
+}
+
+function getimeshpn(phonenumber) {
+    let imeshMobile = "";
+
+    if (phonenumber !== "") {
+        imeshMobile = phonenumber.substring(0, 3) + "*".repeat(phonenumber.length - 5) + phonenumber.slice(-2);
+    }
+
+    return imeshMobile;
+}
+
+function getimeshem(useremail) {
+    let imeshEmail = "";
+
+    if (useremail !== "") {
+        let pos1 = useremail.indexOf("@");
+        let emailDomain = useremail.substring(pos1 + 1);
+        let pos2 = emailDomain.indexOf(".");
+
+        let emailSub1 = "";
+        if (pos1 > 1) {
+            emailSub1 = useremail.charAt(0) + "*".repeat(pos1 - 2) + useremail.charAt(pos1 - 1);
+        } else {
+            emailSub1 = useremail.substring(0, pos1);
+        }
+
+        let emailSub2 = "";
+        if (pos2 > 1) {
+            emailSub2 = emailDomain.charAt(0) + "*".repeat(pos2 - 2) + emailDomain.substring(pos2 - 1);
+        } else {
+            emailSub2 = emailDomain.substring(0);
+        }
+
+        imeshEmail = emailSub1 + "@" + emailSub2;
+    }
+
+    return imeshEmail;
+}
+function updatevalue(keyname, keyval,imesh){
+    if (getimeshparamVal(imesh, keyname) === "" ) {
+        let decodedStr = imeshcookieDecode(imesh);
+        let decodedStrarr = decodedStr.split(keyname+'=')
+        decodedStrarr[0] = decodedStrarr[0] + keyname+"=" + keyval;
+        imesh = decodedStrarr[0] + decodedStrarr[1];
+    }
+    return imesh;
+}
+function setcookie(userObj, name, domain) {
+		if(typeof userObj !== 'undefined'){
+		expires = new Date();
+		if (name == 'ImeshVisitor') {
+			expires.setTime(expires.getTime() + 24 * 60 * 60 * 365 * 2 * 1000);
+			document.cookie = "" + name + "=" +encodeURIComponent(userObj) + ";" + "expires=" + expires.toGMTString() + ";" + "domain="+domain+";path =/;";
+		}
+	}
+}
+
+function Imesh_deleteCookie(name, currdomain) {
+    var domain = currdomain != undefined? currdomain : ".indiamart.com";
+	document.cookie = name + "=;expires=;domain="+domain+";path=/;";
+}
+
+function maskimesh (imesh_val, currdomain) {
+    var domain = currdomain != undefined? currdomain : ".indiamart.com";
+    let imesh = readImeshCookie('ImeshVisitor') ;
+    let username = getimeshparamVal(imesh, 'fn') =="" ? getimeshname(imesh_val.fn, imesh_val.ln):"";
+    let usrphno = getimeshparamVal(imesh, 'mb1') =="" ? getimeshpn(imesh_val.mb1):"";
+    let usremail = getimeshparamVal(imesh, 'em') =="" ? getimeshem(imesh_val.em):"";
+    imesh = username != "" ? updatevalue('fn', username, imesh): imesh ;
+    imesh = usrphno != "" ? updatevalue('mb1', usrphno, imesh): imesh ;
+    imesh = usremail != "" ? updatevalue('em', usremail, imesh): imesh ;
+    Imesh_deleteCookie('ImeshVisitor', domain);
+    setcookie(imesh,"ImeshVisitor", domain)
+}

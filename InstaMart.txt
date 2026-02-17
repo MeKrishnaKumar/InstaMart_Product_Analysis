@@ -1,0 +1,19 @@
+using python
+read electronic - Indiamart.html, industrial machinery - Indiamart.html, laptops - Indiamart.html, textiles - Indiamart.html, iphone - Indiamart.html, processor - Indiamart.html, memory - Indiamart.html and parse it with beautifulsoup
+
+find all div with class="card   brs5 " id="LST1" data-csttypwgt="1114" data-notimpid="ODczNDM4NQ==" data-city="Patna" data-custtypename="NA" data-state="Bihar" data-catid="750" data-mcatid="179822" data-altdispid="null" data-datatype="product" data-dispid="2854126837291" data-itemid="275867372" data-modref="2" data-disflg="1" data-servicemcatprefloc="VGP-BB-sameCty-noDist" data-bl_prod_name="null" data-prodvid="" data-isq="Internal%20Memory(ROM)%3A128%20GB%23Memory%20Size(ROM)%3A128%20GB%23Color%3APink" data-rating="3.6" data-origimg="http://5.imimg.com/data5/SELLER/Default/2024/5/420884693/FG/AW/SO/3692727/iphone-13-mini-128gb-pink-1000x1000.jpg" data-freesupplierverifiedflag="1"
+for all the div find
+try find span class="sidebarText elps elps1" and store it in Keyword (all electronic - Indiamart.html items as electronic, all industrial machinery - Indiamart.html as industrial machinery, same as for all .html)
+except Keyword = ""
+try find p class="price" style="width: calc(100% - 140px);"  and store it in Price
+except Price =  ""
+try find a class="cardlinks" and store it in Name
+except Name = ""
+try find a class="cardlinks elps elps1" and store it in companyName
+except companyName = ""
+try find span with class="highlight" and store it in Location
+except Location = ""
+try find span with class="bo color" and store it in Rating
+except Rating = ""
+
+Open an excel file and write Price, Keyword, Name, companyName, Location, Rating

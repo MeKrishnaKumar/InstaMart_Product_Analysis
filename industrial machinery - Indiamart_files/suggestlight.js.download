@@ -1,0 +1,3260 @@
+// Initialize static map to store elements and their corresponding options
+// This ensures the map persists across all instances
+const suggesterInstanceMap = new Map();
+
+// Debug flag for Suggester map logs - Set this to false to disable Suggester map logs
+const SUGGESTER_MAP_DEBUG = false;
+
+class Suggester {
+  // Helper method for Suggester map logging
+  static _logMap(message, ...args) {
+    if (SUGGESTER_MAP_DEBUG) {
+      console.log(`[Suggester Map] ${message}`, ...args);
+    }
+  }
+  static get suggesterMap() {
+    return suggesterInstanceMap;
+  }
+
+  constructor(options = {}) {
+    // checking for element validity
+    // element can be a text input box or its id
+    this.el =
+      typeof options.element === "string"
+        ? document.getElementById(options.element)
+        : options.element;
+
+    if (!this.el) {
+      // Log missing element as an informational message instead of an error
+      // to avoid cluttering error reports while still notifying developers.
+      console.log(`Auto Suggest: Element ${options.element} not found.`);
+      return;
+    }
+
+    // Store initial constructor options before any modifications
+    this.initialOptions = { ...options };
+
+    // Check if a suggester already exists for this element
+    const existingData = Suggester.suggesterMap.get(this.el);
+    Suggester._logMap("Checking element:", this.el.id || "element without id");
+
+    if (existingData) {
+      Suggester._logMap("Found existing suggester for element");
+      // Compare initial options to see if they are different
+      const existingOptions = JSON.stringify(existingData.initialOptions);
+      const newOptions = JSON.stringify(this.initialOptions);
+
+      if (existingOptions === newOptions) {
+        Suggester._logMap("Initial options match - reusing existing suggester");
+        Suggester._logMap("Existing initial options:", existingOptions);
+        return existingData.suggester;
+      } else {
+        Suggester._logMap("Initial options differ - creating new suggester");
+        Suggester._logMap("Existing initial options:", existingOptions);
+        Suggester._logMap("New initial options:", newOptions);
+      }
+    } else {
+      Suggester._logMap(
+        "No existing suggester found for element - creating new one"
+      );
+    }
+
+    // Remove all existing suggestion boxes and dims for this element before initializing a new Suggester
+    this.elId = this.el && this.el.id;
+    if (this.elId) {
+      document
+        .querySelectorAll(`.imas-${this.elId}`)
+        .forEach((el) => el.remove());
+      document
+        .querySelectorAll(`.sugg_dim.imas-${this.elId}`)
+        .forEach((el) => el.remove());
+    }
+
+    this._ga =
+      parseInt((this.readCookie("_ga") ?? "").split(".").pop() || "0") % 100;
+
+    // TODO: check if multiple Suggester objects on the same page are not creating variable clashing of the Suggester function
+
+    // Store this suggester instance and its initial options in the map
+    Suggester.suggesterMap.set(this.el, {
+      suggester: this,
+      initialOptions: this.initialOptions,
+    });
+    Suggester._logMap(
+      "Stored new suggester for element:",
+      this.el.id || "element without id"
+    );
+    Suggester._logMap(
+      "With initial options:",
+      JSON.stringify(this.initialOptions)
+    );
+    Suggester._logMap("Current map size:", Suggester.suggesterMap.size);
+
+    this.opt = {
+      ...{
+        onSelect: null,
+        onExplicitChange: null,
+        debounce: 10,
+        autoSelect: false,
+        type: "product",
+        minStringLengthToDisplaySuggestion: 0, // suggestions will be displayed only if typed string length is at least greater than this number. If we need default contextual suggestions this number should be zero. TODO: this variable name can be shortened.
+        minStringLengthToFetchSuggestion: 0, // suggestions will be fetched and prepared only if typed string length is at least greater than this number. If we need default contextual suggestions this number should be zero. TODO: this variable name can be shortened.
+        maxCharForSuggestionRequest: 30, // TODO: this variable name can be shortened. match the name with "minStringLengthToFetchSuggestion"
+        suggestions: null, // array of static suggestions passed in input
+        // maxSuggestLen: 40, // TODO: show only suggestions having length <= maxSuggestLen. we may actually not need this at front-end
+        suggestionCount: 10,
+        placeholder: "",
+        context: { mcat: 0, cat: 0 },
+        displayFields: "label", //TODO: pass this to apiUrl. it may contain comma separated list of fields to be displayed. API will use either displaySeparator or "constants" to display the value. *constants: values inside square brackets '[]' indicate the constants / literals which are to be displayed as it is. other comma separated values are treated as fields which must be available in the data. if the mentioned field is not found in the data the value will be left blank
+        displaySeparator: "", //TODO: pass this to apiUrl. it is used between displayFields is passed more than one
+        module: "", //TODO: use this for tracking
+        apiUrl: "https://suggest.imimg.com/suggest/suggester.php",
+        categorizedUIEnabled: false,
+        debug: false, // enable to see verbose logs for debugging mobile copy icon issues
+        frstcapcase: 0, // Option to capitalize first letter of each word
+      },
+      ...options,
+    };
+    this.typeDefaults = {
+      product: {
+        apiArrayKey: "product",
+        localStorageKey: "keyw_data",
+        urlParams: {
+          fields: "type_data,sort_order",
+          match: "fuzzy",
+        },
+      },
+      location: {
+        apiArrayKey: "location",
+        localStorageKey: "cities",
+        apiUrl: "https://suggest.imimg.com/suggest/suggest.php",
+        urlParams: {
+          fields: "state,id,state_id,flname,alias,location_id",
+          display_fields: "value,state",
+          // display_separator: ",+",
+          match: "exact",
+        },
+        useMyLocation: this.opt.useMyLocation,
+        defaultCities: this.opt.defaultCities,
+      },
+      locality: {
+        apiArrayKey: "locality",
+        urlParams: {
+          display_fields: "value",
+          pincode: this.opt.pincode || "",
+        },
+      },
+      country: {
+        apiArrayKey: "country",
+        apiUrl: "https://suggest.imimg.com/suggest/suggest.php",
+        urlParams: {
+          fields: "flname,location_id,typ,state,iso",
+          display_fields:
+            "city:value,[+(],type,[)+in+],state|state:value,[+(],type,[)+in+],[India]|country:value,[+(],type,[)]|default:value",
+          match: "exact",
+          method: "beginString",
+          limit: 40,
+        },
+      },
+      city: {
+        apiUrl: "https://suggest.imimg.com/suggest/suggest.php",
+        apiArrayKey: "city", // TODO: the key needs to be either "city" or a generic one, e.g. "results"
+        localStorageKey: "cities",
+        urlParams: {
+          fields: "state,id,stateid,flname,alias",
+          display_fields: "value,state",
+          match: "fuzzy",
+        },
+      },
+      isd: {
+        apiUrl: "https://suggest.imimg.com/suggest/suggest.php",
+        apiArrayKey: "isd",
+        urlParams: {
+          fields: "cname,iso,icon_order",
+          display_fields: "cname,value",
+          display_separator: "  +",
+        },
+      },
+      unit: {
+        apiUrl: "https://suggest.imimg.com/suggest/suggest.php",
+        apiArrayKey: "unit",
+        urlParams: {
+          match: "fuzzy",
+          limit: 40,
+        },
+      },
+      mcat: {
+        apiUrl: "https://suggest.imimg.com/suggest/suggest.php",
+        apiArrayKey: "mcat",
+        urlParams: {
+          match: "exact",
+          fields: "name,mcat_id",
+          display_fields: "value",
+          limit: 40,
+        },
+      },
+    };
+
+    // this.contextualDataAvl = true;
+    // if (this.opt.type == "product") {
+    //   this.contextualDataAvl = false;
+    // }
+    /** find suggestions matching with "val" and return 
+      1. check in recent data and return immediately with suggestions
+      2. call api output which should append the suggestions to already displaying suggestions
+    **/
+    // this.opt = { ...this.typeDefaults[this.opt.type], ...this.opt };
+    this.opt = { ...this.opt, ...this.typeDefaults[this.opt.type] };
+    // Update cityInfo from opt if type is product
+    if (this.opt.type === "product") {
+      this.cityInfo = this.opt.cityInfo;
+    }
+    // Add support for custom source
+    this.source = options.source;
+    if (this.source) {
+      this.opt.type = "custom-source";
+    }
+
+    // FIXME update urlparams display_fields , fields , display_seperator from this.opt
+    this.opt.urlParams = {
+      ...this.opt.urlParams,
+      ...(this.opt.displayFields && { display_fields: this.opt.displayFields }),
+      ...(this.opt.displaySeparator && {
+        display_separator: this.opt.displaySeparator,
+      }),
+      ...(this.opt.fields && { fields: this.opt.fields }),
+      ...(this.opt.filters && { filters: this.opt.filters }),
+    };
+
+    this.box = null;
+    this.dropdown = null;
+    this.cur = this.opt.autoSelect ? 0 : -1;
+    this.items = [];
+    this.shownItems = [];
+    this.val = "";
+    this.req = null;
+    this.cache = new SuggestionCache();
+    this.isFetching = false; // Flag to prevent duplicate API requests
+    this.preventHide = false; // Flag to prevent hiding during copy icon interactions
+    this.itemSelected = false; // Flag to track when a suggestion item was selected
+
+    // Disable browser's default autocomplete behaviour on the input.
+    this.el.autocomplete = "off";
+    if (options.placeholder !== undefined) {
+      this.el.placeholder = this.opt.placeholder;
+    }
+
+    // Helper function to capitalize first letter of each word
+    this.capitalizeFirstLetter = (str) => {
+      if (!str) return str;
+      return str.replace(/\w\S*/g, (txt) => {
+        return txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase();
+      });
+    };
+
+    // Ensure _boundHandlers exists before accessing any keys
+    if (!this.el._boundHandlers) {
+      this.el._boundHandlers = {};
+    }
+
+    if (this.opt.type != "isd") {
+      // Attach all the events required for the interactions in one go.
+      ["input", "keydown", "blur", "focus", "click"].forEach((k) => {
+        // Remove previous handler if it exists required as new suggester on same element will add event listener again
+        if (this.el._boundHandlers[k]) {
+          // console.log(`Removed listener for ${k}`);
+          this.el.removeEventListener(k, this.el._boundHandlers[k]);
+        }
+
+        // Bind and store the new handler for this event type
+        const boundHandler = this.handleEvent.bind(this);
+        this.el._boundHandlers[k] = boundHandler;
+        this.el.addEventListener(k, boundHandler);
+      });
+    } else {
+      // Attach all the events required for the interactions in one go.
+      ["click"].forEach((k) => {
+        // Remove previous handler if it exists required as new suggester on same element will add event listener again
+        if (this.el._boundHandlers[k]) {
+          // console.log(`Removed listener for ${k}`);
+          this.el.removeEventListener(k, this.el._boundHandlers[k]);
+        }
+
+        // Bind and store the new handler for this event type
+        const boundHandler = this.handleEvent.bind(this);
+        this.el._boundHandlers[k] = boundHandler;
+        this.el.addEventListener(k, boundHandler);
+      });
+
+      // If defaultValue is empty or whitespace, treat it as missing and default to "IN"
+      const _defaultCountry =
+        (this.opt.defaultValue ?? "").toString().trim() || "IN";
+      this.initialCountryRender(_defaultCountry);
+
+      window.addEventListener("click", (event) => {
+        if (!this.el.contains(event.target)) {
+          this.hide();
+        }
+      });
+    }
+    window.addEventListener("scroll", () => this.hide());
+
+    // Initialize contextual seller data if sellerId is provided and type is product
+    if (this.opt.type === "product" && this.opt.context.sellerId) {
+      this.initializeContextualSellerData();
+
+      // Add event listener for contextual data loaded
+    }
+  }
+
+  // Helper function to check if a string contains location indicators
+  hasLocationIndicator(text) {
+    if (!text) return false;
+    const lowerText = text.toLowerCase();
+    return (
+      lowerText.includes(" in ") ||
+      lowerText.includes(" near ") ||
+      lowerText.includes(" from ")
+    );
+  }
+
+  // Helper function to check if this is a location suggester with empty input
+  _isEmptyLocationSuggester() {
+    return this.opt.type === "location" && this.val.trim() === "";
+  }
+
+  // Debug logging helper
+  _debug(tag, data) {
+    try {
+      if (this.opt.debug) {
+        console.log(`[Suggester][${tag}]`, data);
+      }
+    } catch (_) { }
+  }
+
+  // Helper to dispatch real input events for external listeners
+  _dispatchInputEvent() {
+    try {
+      const evt = new Event("input", { bubbles: true });
+      this.el.dispatchEvent(evt);
+    } catch (_) {
+      try {
+        this.el.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      } catch (__) {
+        // Fallback for very old browsers - no-op
+      }
+    }
+  }
+
+  // Clone incoming event (or plain object) so that callbacks receive an event
+  // whose target/currentTarget refer to the input element.
+  _cloneEventForSelect(originalEvent) {
+    if (!this.el) {
+      return originalEvent || null;
+    }
+
+    const type = (originalEvent && originalEvent.type) || "click";
+    const isDomEvent =
+      typeof Event !== "undefined" && originalEvent instanceof Event;
+
+    let eventClone = null;
+
+    try {
+      const EventCtor =
+        isDomEvent && typeof originalEvent.constructor === "function"
+          ? originalEvent.constructor
+          : Event;
+      const init = Suggester._extractEventInit(
+        isDomEvent ? originalEvent : null
+      );
+      eventClone = new EventCtor(type, init);
+    } catch (_) {
+      try {
+        eventClone = new Event(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        });
+      } catch (__) {
+        eventClone = null;
+      }
+    }
+
+    if (!eventClone) {
+      return originalEvent || null;
+    }
+
+    if (originalEvent && typeof originalEvent === "object") {
+      Suggester._assignCustomEventProps(originalEvent, eventClone);
+    }
+
+    Suggester._overrideEventTargets(eventClone, this.el);
+
+    return eventClone;
+  }
+
+  static _extractEventInit(event) {
+    if (!(event instanceof Event))
+      return { bubbles: true, cancelable: true, composed: true };
+    const base = {
+      bubbles: event.bubbles,
+      cancelable: event.cancelable,
+      composed: event.composed,
+    };
+    const match = [
+      [
+        typeof CustomEvent !== "undefined" && event instanceof CustomEvent,
+        ["detail"],
+      ],
+      [
+        typeof InputEvent !== "undefined" && event instanceof InputEvent,
+        ["data", "isComposing", "inputType"],
+      ],
+      [
+        typeof KeyboardEvent !== "undefined" && event instanceof KeyboardEvent,
+        [
+          "key",
+          "code",
+          "location",
+          "ctrlKey",
+          "shiftKey",
+          "altKey",
+          "metaKey",
+          "repeat",
+          "isComposing",
+        ],
+      ],
+      [
+        typeof PointerEvent !== "undefined" && event instanceof PointerEvent,
+        [
+          "pointerId",
+          "width",
+          "height",
+          "pressure",
+          "tangentialPressure",
+          "tiltX",
+          "tiltY",
+          "twist",
+          "pointerType",
+          "isPrimary",
+          "screenX",
+          "screenY",
+          "clientX",
+          "clientY",
+          "ctrlKey",
+          "shiftKey",
+          "altKey",
+          "metaKey",
+          "button",
+          "buttons",
+          "relatedTarget",
+        ],
+      ],
+      [
+        typeof MouseEvent !== "undefined" && event instanceof MouseEvent,
+        [
+          "screenX",
+          "screenY",
+          "clientX",
+          "clientY",
+          "ctrlKey",
+          "shiftKey",
+          "altKey",
+          "metaKey",
+          "button",
+          "buttons",
+          "relatedTarget",
+        ],
+      ],
+      [
+        typeof UIEvent !== "undefined" && event instanceof UIEvent,
+        ["detail", "view"],
+      ],
+    ].find(([ok]) => ok);
+    if (match) match[1].forEach((prop) => (base[prop] = event[prop]));
+    return base;
+  }
+
+  static _assignCustomEventProps(source, target) {
+    const skip = new Set(["target", "currentTarget", "srcElement"]);
+    Reflect.ownKeys(source || {}).forEach((key) => {
+      if (skip.has(key)) return;
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(source, key);
+        if (descriptor && (descriptor.get || descriptor.set)) {
+          Object.defineProperty(target, key, descriptor);
+        } else {
+          target[key] = descriptor ? descriptor.value : source[key];
+        }
+      } catch (_) {
+        try {
+          target[key] = source[key];
+        } catch (__) { }
+      }
+    });
+  }
+
+  static _overrideEventTargets(eventObj, targetEl) {
+    if (!eventObj || !targetEl) return;
+    const defineTargetProp = (prop) => {
+      try {
+        Object.defineProperty(eventObj, prop, {
+          configurable: true,
+          enumerable: true,
+          get: () => targetEl,
+        });
+      } catch (_) {
+        // Ignore if property cannot be redefined
+      }
+    };
+
+    ["target", "currentTarget", "srcElement"].forEach(defineTargetProp);
+  }
+
+  readCookie(name) {
+    const cookies = document.cookie.split(";");
+
+    for (let i = 0; i < cookies.length; i++) {
+      const cookie = cookies[i].trim();
+      if (cookie.startsWith(name + "=")) {
+        return cookie.substring(name.length + 1);
+      }
+    }
+    return null;
+  }
+
+  // Helper function to handle contextual seller data
+  async initializeContextualSellerData() {
+    const sellerId = this.opt.context.sellerId;
+    const existingData = this.getContextualSellerData(sellerId);
+
+    // Check if data exists and is not expired
+    if (
+      existingData &&
+      existingData.exp_date &&
+      !this.isExpired(existingData.exp_date)
+    ) {
+      return; // Data exists and is not expired, no need to call API
+    }
+
+    // Call API to fetch contextual seller data
+    try {
+      const response = await this.fetchContextualSellerData(sellerId);
+      if (response && response.status === 200) {
+        // Handle both old and new API response formats
+        let products = [];
+        if (response.recommended && Array.isArray(response.recommended)) {
+          // New API format
+          products = response.recommended;
+        } else if (response.product && Array.isArray(response.product)) {
+          // Old API format
+          products = response.product;
+        }
+        if (products.length > 0) {
+          return this.storeContextualSellerData(sellerId, products);
+        }
+      }
+    } catch (error) {
+      console.error("Error initializing contextual seller data:", error);
+    }
+  }
+
+  // Helper function to fetch contextual seller data from API
+  // New grouped endpoint (suggestwrapper) - includes group info when categorized UI is enabled
+  async fetchContextualSellerData(sellerId) {
+    try {
+      const formData = new FormData();
+      formData.append("glsurid", sellerId);
+      formData.append("modid", "SELLERMY");
+
+      // Extract AK value from im_iss cookie and remove "t=" prefix
+      const imIssCookie = this.readCookie("im_iss");
+      if (imIssCookie) {
+        const akValue = imIssCookie.startsWith("t=")
+          ? imIssCookie.substring(2)
+          : imIssCookie;
+        formData.append("AK", akValue);
+      }
+
+      // Choose endpoint based on categorized UI flag:
+      // - categorizedUIEnabled === true -> use grouped endpoint (suggestwrapper)
+      // - categorizedUIEnabled === false -> use old endpoint (no group info)
+      const endpoint =
+        this.opt.categorizedUIEnabled === true
+          ? "https://seller.indiamart.com/miscreact/ajaxrequest/seller/blsearchSuggest/suggestwrapper/"
+          : "https://seller.indiamart.com/miscreact/ajaxrequest/seller/blsearchSuggest/suggest/";
+
+      // For old endpoint, only sellerId is required; remove modid/AK to avoid backend ignoring the request
+      if (this.opt.categorizedUIEnabled !== true) {
+        try {
+          // Rebuild minimal formData with only glsurid
+          const minimal = new FormData();
+          minimal.append("sellerId", sellerId);
+          // Replace the original formData reference
+          formData = minimal;
+        } catch (e) {
+          // If FormData re-assignment fails in some browsers, fall back by creating new object reference
+          const minimal = new FormData();
+          minimal.append("sellerId", sellerId);
+          // Shadow the variable for fetch call
+          var _body = minimal;
+        }
+      }
+
+      const response = await fetch(endpoint, {
+        method: "POST",
+        body: typeof _body !== "undefined" ? _body : formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error("Error fetching contextual seller data:", error);
+      return null;
+    }
+  }
+
+  // Helper function to store contextual seller data
+  storeContextualSellerData(sellerId, products) {
+    // Transform new API format to expected format
+    const transformedProducts = products.map((product) => {
+      // Check if this is the new format (with group, group_priority, score)
+      if (product.group !== undefined) {
+        // Transform new format to expected format
+        return {
+          label: product.label,
+          value: product.value,
+          priority: product.priority,
+          cls: product.cls || "recent", // comes as recommended
+          data: {
+            type_data: "6", // Default value as in old format
+            sort_order: product.priority.toString(),
+            group: product.group,
+            group_priority: product.group_priority,
+            score: product.score,
+          },
+        };
+      } else {
+        // Already in expected format
+        // in old api cls as comes as recent from api
+        return product;
+      }
+    });
+
+    const expDate = this.getExpiryDate();
+    const contextualData = {
+      data: { sugg: transformedProducts },
+      exp_date: expDate,
+      id: sellerId,
+    };
+
+    // Get existing cntxt_sell data
+    const existingData = this.recent("cntxt_sell") || [];
+
+    // Check if object with matching sellerId exists
+    const existingIndex = existingData.findIndex(
+      (item) => item.id === sellerId
+    );
+
+    if (existingIndex !== -1) {
+      // Update existing object
+      existingData[existingIndex] = contextualData;
+    } else {
+      // Add new object
+      existingData.push(contextualData);
+    }
+
+    // Store updated data using recent function
+    this.recent({ cntxt_sell: existingData });
+    return contextualData;
+  }
+
+  // Helper function to get contextual seller data
+  getContextualSellerData(sellerId) {
+    var cntxtSellData = this.recent("cntxt_sell") || [];
+    return cntxtSellData.find((item) => item.id === sellerId);
+  }
+
+  // Helper function to check if data is expired
+  isExpired(expDate) {
+    const currentDate = new Date();
+    const expYear = parseInt(expDate.substring(0, 4));
+    const expMonth = parseInt(expDate.substring(4, 6)) - 1; // Month is 0-indexed
+    const expDay = parseInt(expDate.substring(6, 8));
+    const expHour = parseInt(expDate.substring(8, 10));
+    const expMinute = parseInt(expDate.substring(10, 12));
+
+    const expirationDate = new Date(
+      expYear,
+      expMonth,
+      expDay,
+      expHour,
+      expMinute
+    );
+    return currentDate > expirationDate;
+  }
+
+  // Helper function to generate expiry date (1 day later at 6:30 AM)
+  getExpiryDate() {
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(now.getDate() + 1);
+    tomorrow.setHours(6, 30, 0, 0); // 6:30 AM
+
+    return [
+      tomorrow.getFullYear(),
+      String(tomorrow.getMonth() + 1).padStart(2, "0"),
+      String(tomorrow.getDate()).padStart(2, "0"),
+      String(tomorrow.getHours()).padStart(2, "0"),
+      String(tomorrow.getMinutes()).padStart(2, "0"),
+    ].join("");
+  }
+
+  handleEvent(event) {
+    this._debug("handleEvent", {
+      type: event.type,
+      elValue: this.el?.value,
+      val: this.val,
+      isFetching: this.isFetching,
+      preventHide: this.preventHide,
+    });
+
+    switch (event.type) {
+      case "keydown":
+        if (!this.handleKeydown(event)) return;
+        break;
+      case "blur":
+        // Delay hide to allow click events to process first and respect preventHide flag
+        setTimeout(() => {
+          if (!this.preventHide) {
+            this._debug("blur:hide", { preventHide: this.preventHide });
+
+            // For unit suggester, trigger onExplicitChange if defined and no suggestion was selected
+            if (
+              this.opt.type === "unit" &&
+              this.opt.onExplicitChange &&
+              typeof this.opt.onExplicitChange === "function" &&
+              !this.itemSelected
+            ) {
+              // Clone incoming event so that callbacks receive an event whose target/currentTarget refer to the input element
+              let clonedEvent = null;
+              try {
+                clonedEvent = this._cloneEventForSelect(event);
+              } catch (_) {
+                // If cloning fails, use the original event
+              }
+              let eventForOnExplicitChange = clonedEvent || event || null;
+
+              // Pass the first suggestion if any were shown, otherwise empty item object
+              const firstItem =
+                this.shownItems && this.shownItems.length > 0
+                  ? this.shownItems[0]
+                  : {};
+              const ui = { item: firstItem };
+              this.opt.onExplicitChange(eventForOnExplicitChange, ui);
+            }
+
+            this.hide();
+          } else {
+            this._debug("blur:prevented", { preventHide: this.preventHide });
+          }
+          this.preventHide = false;
+          this.itemSelected = false; // Reset itemSelected flag
+        }, 200);
+        return;
+      case "focus":
+      case "input":
+        this.val = event.target.value;
+        this._debug("input:update", { newVal: this.val });
+        clearTimeout(this.req);
+        this.req = setTimeout(() => this.query(), this.opt.debounce);
+        break;
+      case "click":
+        if (this.opt.type == "isd") {
+          if (!this.dropdown) {
+            this.query();
+          } else {
+            // console.log("closing dropdown");
+            this.hide();
+          }
+        } else if (
+          (this.opt.type == "product" || this.opt.type == "country") &&
+          !this.isFetching
+        ) {
+          // Only query if not already fetching
+          this.query();
+        }
+    }
+  }
+
+  handleKeydown(e) {
+    if (!this.box) {
+      return e.keyCode === 38 || e.keyCode === 40 ? true : false;
+    }
+
+    switch (e.keyCode) {
+      case 38:
+        return this.navigate(-1, e); // Up arrow.
+      case 40:
+        return this.navigate(1, e); // Down arrow
+      case 9: // Tab
+        //e.preventDefault(); // commented to that tab may set the focus to next item, which is most probably a submit button
+        this.select(e, this.cur);
+        this.hide();
+        return;
+      case 13: // Enter
+        if (this.cur != "-1") {
+          this.select(e, this.cur);
+        }
+        this.hide();
+        return;
+      case 27: // Escape.
+        this.hide();
+        return;
+    }
+  }
+
+  // Helper function to append cityInfo to first item if possible
+  appendCityInfoToFirstItem(items) {
+    // Check if first item doesn't contain location indicators
+    if (
+      !this.hasLocationIndicator(items[0].value) &&
+      !this.hasLocationIndicator(items[0].label)
+    ) {
+      const modifiedItems = [...items]; // shallow copy
+      // Create modified and original copies
+      const modified = {
+        ...items[0],
+        value: items[0].value + ` near ${this.cityInfo}`,
+        label: items[0].label + ` near ${this.cityInfo}`,
+      };
+      modifiedItems.splice(0, 1, modified, items[0]); // Insert modified at 0, original at 1
+      return { items: modifiedItems, cityInfoAdded: true };
+    }
+    return { items: items, cityInfoAdded: false };
+  }
+
+  /** This function tries to fetch the suggestions matching with the input. Once fetched, it prepares the appropriate data structure and renders the results on the UI
+   **/
+  async query() {
+    this._debug("query:start", {
+      val: this.val,
+      type: this.opt.type,
+      isFetching: this.isFetching,
+    });
+
+    // Prevent duplicate API calls
+    if (this.isFetching && this.val && this.val.trim().length > 0) {
+      this._debug("query:skip", { reason: "already-fetching" });
+      return;
+    }
+    this.isFetching = true;
+
+    // Input validation - common for all types
+    if (
+      this.val.length < this.opt.minStringLengthToFetchSuggestion ||
+      this.val.length > this.opt.maxCharForSuggestionRequest
+    ) {
+      this.hide();
+      this.isFetching = false;
+      this._debug("query:skip", { reason: "length-constraint", val: this.val });
+      return;
+    }
+
+    this.start = performance.now();
+    const q = this.val.toLowerCase().trim();
+
+    // --- Custom source support ---
+    if (this.opt.type == "custom-source") {
+      if (Array.isArray(this.source)) {
+        // Static array: filter and use
+        this.items = SUtils.match(q, SUtils.arrToSug(this.source));
+        if (this.opt.type != "isd") this.renderResults("static");
+      } else if (typeof this.source === "function") {
+        // Function: call with (query, callback)
+        let result;
+        try {
+          result =
+            this.source.length >= 2
+              ? await new Promise((resolve) => this.source(q, resolve))
+              : await this.source(q);
+        } catch (e) {
+          result = [];
+        }
+        this.items = SUtils.match(q, SUtils.arrToSug(result || []));
+        if (this.opt.type != "isd") this.renderResults("static");
+      }
+      this.isFetching = false;
+      if (!this.items.length) {
+        this.hide();
+        return;
+      }
+      return;
+    }
+    // --- End custom source support ---
+
+    // Handle different suggester types with separate logic paths
+    if (this.opt.type === "location") {
+      await this.handleLocationQuery(q);
+    } else if (this.opt.type === "isd") {
+      await this.handleIsdQuery(q);
+    } else if (this.opt.type === "product") {
+      await this.handleProductQuery(q);
+    } else {
+      // Generic handling for other types (city, etc.)
+      await this.handleGenericQuery(q);
+    }
+
+    if (!this.items.length) {
+      this.hide();
+      this.isFetching = false;
+      this._debug("query:end", { items: 0 });
+      return;
+    }
+    this.isFetching = false;
+    this._debug("query:end", { items: this.items.length });
+  }
+
+  /**
+   * Handle location-specific query logic
+   */
+  async handleLocationQuery(q) {
+    // Check for static suggestions
+    if (this.opt.suggestions) {
+      this.items = SUtils.match(q, SUtils.arrToSug(this.opt.suggestions));
+      this.renderResults("static");
+      return;
+    }
+
+    // Initialize items array
+    let combinedItems = [];
+
+    // 1. Add "Use My Location" at the first position only when q is empty and useMyLocation is true
+    if (q === "" && this.opt.useMyLocation) {
+      combinedItems.push({
+        label: "Use my location",
+        value: "Use my location",
+        isMyLocation: true,
+        cls: "use-my-location",
+      });
+    }
+
+    // 2. Add default cities (can be cached) - but only when q is empty or for matching results
+    let defaultCitiesItems = [];
+    let allIndiaItem = null;
+
+    if (this.opt.defaultCities && this.opt.defaultCities.length > 0) {
+      // Separate "All India" from other default cities
+      const allIndiaItemSource = this.opt.defaultCities.find(
+        (city) => city.toLowerCase() === "all india"
+      );
+
+      const otherDefaultCities = this.opt.defaultCities.filter(
+        (city) => city.toLowerCase() !== "all india"
+      );
+
+      // Convert other default cities to suggestion format and match with query
+      defaultCitiesItems = SUtils.arrToSug(
+        otherDefaultCities.map((city) => {
+          if (typeof city === "string") {
+            return { label: city, value: city, data: { isDefault: true } };
+          }
+          return { ...city, data: { ...(city.data || {}), isDefault: true } };
+        })
+      );
+
+      // Filter default cities based on query for non-empty queries
+      if (q !== "") {
+        defaultCitiesItems = SUtils.match(q, defaultCitiesItems);
+      }
+
+      // Add default cities after "Use My Location"
+      combinedItems = [...combinedItems, ...defaultCitiesItems];
+
+      // Store for later use
+      allIndiaItem = allIndiaItemSource
+        ? typeof allIndiaItemSource === "string"
+          ? { label: allIndiaItemSource, value: allIndiaItemSource }
+          : allIndiaItemSource
+        : null;
+    }
+
+    // 3. Fetch from local sources (cache and localStorage)
+    let [r, c, exactMatchInCache] = await this.fetchLocal(q);
+
+    // Combine recent and cache items
+    let localItems = [...r, ...c];
+
+    // Remove duplicates between recent and cache
+    localItems = SUtils.removeDuplicateLabels(localItems);
+
+    // Add local items after default cities
+    // Default city removal (if they match API/cache items) happens in deduplication section below
+    combinedItems = [...combinedItems, ...localItems];
+
+    // 4. Fetch suggestions from API if no exact cache match
+    let apiResult = [];
+    if (!exactMatchInCache) {
+      apiResult = SUtils.arrToSug(await this.onQuery(this.val));
+    }
+
+    // Remove default cities that match local/cache or API results (keep those items as they have richer data)
+    // Build set of values for deduplication
+    // From cache: only use NON-DEFAULT items (enriched data like "Noida Uttar Pradesh")
+    // From API: use all items
+    const nonDefaultLocalItems = localItems.filter(
+      (item) => !item.data?.isDefault
+    );
+    const localAndApiValuesSet = new Set(
+      [...nonDefaultLocalItems, ...(apiResult || [])].map((item) =>
+        (item.value || "").toLowerCase()
+      )
+    );
+
+    // Track which default items are actually displayed (not removed by deduplication)
+    const displayedDefaultItems = [];
+
+    // Remove default cities that have matching local/cache or API results
+    combinedItems = combinedItems.filter((item) => {
+      // If this is a default city and we have a matching non-default local/API value, remove it
+      if (
+        item.data?.isDefault &&
+        localAndApiValuesSet.has((item.value || "").toLowerCase())
+      ) {
+        return false; // Remove default city, keep the richer data version
+      }
+      // Track default items that are actually displayed
+      if (item.data?.isDefault) {
+        displayedDefaultItems.push(item);
+      }
+      return true;
+    });
+
+    // If no exact cache match, filter API items that have matching labels with non-default items (cache/local)
+    if (!exactMatchInCache && apiResult.length > 0) {
+      const existingLabelsSet = new Set(
+        combinedItems
+          .filter((it) => !it.data?.isDefault)
+          .map((it) => (it.label || "").toLowerCase())
+      );
+
+      apiResult = apiResult.filter((apiItem) => {
+        const apiLabel = (apiItem.label || "").toLowerCase();
+        // Skip API item if its label matches an existing non-default item
+        return !existingLabelsSet.has(apiLabel);
+      });
+
+      // Add API results after local items
+      combinedItems = [...combinedItems, ...apiResult];
+    }
+
+    // 5. Add "All India" at the end only when q is empty (should not be cached)
+    // Reserve space for "All India" by reducing the slice count by 1
+    let sliceCount = this.opt.suggestionCount;
+    if (q === "" && allIndiaItem) {
+      // Remove any existing "All India" to avoid duplicates
+      combinedItems = combinedItems.filter(
+        (item) => item.value.toLowerCase() !== "all india"
+      );
+
+      // Reduce slice count to make room for "All India"
+      if (combinedItems.length >= this.opt.suggestionCount) {
+        sliceCount = this.opt.suggestionCount - 1;
+      }
+    }
+
+    // 6. Apply suggestion count limit
+    combinedItems = combinedItems.slice(0, sliceCount);
+
+    // 7. Add "All India" at the end only when q is empty (should not be cached)
+    if (q === "" && allIndiaItem) {
+      // Add "All India" at the end
+      combinedItems.push(allIndiaItem);
+    }
+
+    // Set items and render results with API data
+    this.items = combinedItems;
+
+    // Update cache with appropriate items (excluding "Use my location" and "All India")
+    const itemsToCache = combinedItems.filter(
+      (item) =>
+        item.value !== "Use my location" &&
+        item.value.toLowerCase() !== "all india"
+    );
+
+    // If we have default cities, include only the displayed ones in cache (but only for empty query)
+    if (q === "" && displayedDefaultItems.length > 0) {
+      // Build cache with displayed defaults first, then API and local items
+      // Only cache defaults that were actually displayed (not filtered by deduplication)
+      const allItemsToCache = [];
+
+      // Add displayed default cities first (they are displayed first in suggestions)
+      displayedDefaultItems.forEach((defaultItem) => {
+        allItemsToCache.push(defaultItem);
+      });
+
+      // Add API results that don't match displayed defaults
+      apiResult.forEach((apiItem) => {
+        if (
+          !allItemsToCache.some(
+            (item) => item.value.toLowerCase() === apiItem.value.toLowerCase()
+          )
+        ) {
+          allItemsToCache.push(apiItem);
+        }
+      });
+
+      // Add local items that aren't already in cache
+      localItems.forEach((localItem) => {
+        if (
+          !allItemsToCache.some(
+            (item) => item.value.toLowerCase() === localItem.value.toLowerCase()
+          )
+        ) {
+          allItemsToCache.push(localItem);
+        }
+      });
+
+      this.cache.setCache(
+        { value: q, context: this.opt.context },
+        allItemsToCache
+      );
+    } else if (!exactMatchInCache) {
+      this.cache.setCache(
+        { value: q, context: this.opt.context },
+        itemsToCache
+      );
+    }
+
+    // Render results
+    if (combinedItems.length > 0) {
+      this.renderResults("apiResults");
+    } else {
+      // Hide only if we have no items at all
+      this.hide();
+    }
+  }
+
+  /**
+   * Handle ISD-specific query logic
+   */
+  async handleIsdQuery(q) {
+    // Set static ISD items
+    this.items = [
+      {
+        value: "91",
+        label: "India  +91",
+        data: {
+          cname: "India",
+          iso: "IN",
+          icon_order: "154",
+        },
+      },
+      {
+        value: "1",
+        label: "United States Of America  +1",
+        data: {
+          cname: "United States Of America",
+          iso: "US",
+          icon_order: "4",
+        },
+      },
+      {
+        value: "971",
+        label: "United Arab Emirates  +971",
+        data: {
+          cname: "United Arab Emirates",
+          iso: "AE",
+          icon_order: "202",
+        },
+      },
+      {
+        value: "44",
+        label: "United Kingdom  +44",
+        data: {
+          cname: "United Kingdom",
+          iso: "UK",
+          icon_order: "5",
+        },
+      },
+      {
+        value: "61",
+        label: "Australia  +61",
+        data: {
+          cname: "Australia",
+          iso: "AU",
+          icon_order: "156",
+        },
+      },
+    ];
+
+    // Check for static suggestions
+    if (this.opt.suggestions) {
+      this.items = SUtils.match(q, SUtils.arrToSug(this.opt.suggestions));
+      this.renderDropdown();
+      return;
+    }
+
+    // Fetch from local sources (cache and localStorage)
+    let [r, c, exactMatchInCache] = await this.fetchLocal(q);
+    var rnc = r.concat(c);
+
+    if (rnc && rnc.length) {
+      // Combine with static ISD items
+      this.items = [...this.items, ...rnc];
+      this.renderDropdown();
+    } else {
+      this.hide();
+    }
+
+    // Fetch suggestions from API if no exact cache match
+    if (!exactMatchInCache) {
+      var apiResult = SUtils.arrToSug(await this.onQuery(this.val));
+      this.items = [...this.items, ...apiResult["isd"]];
+      this.cache.setCache({ value: q, context: this.opt.context }, [
+        ...c,
+        ...apiResult["isd"],
+      ]);
+      this.renderDropdown();
+    }
+  }
+
+  /**
+   * Handle product-specific query logic
+   */
+  async handleProductQuery(q) {
+    // Check for static suggestions
+    if (this.opt.suggestions) {
+      this.items = SUtils.match(q, SUtils.arrToSug(this.opt.suggestions));
+      this.renderResults("static");
+      return;
+    }
+
+    // Fetch from local sources (cache and localStorage)
+    let [r, c, exactMatchInCache] = await this.fetchLocal(q);
+
+    // Priority order for cityInfo: recent â†’ cache â†’ apiResult
+    let appendCityInfoTry = false;
+    let cityInfoAdded = false;
+
+    // Try to add cityInfo to recent suggestions first
+    if (r && r.length > 0 && this.cityInfo) {
+      appendCityInfoTry = true;
+      const { items: modifiedR, cityInfoAdded: recentCityInfoAdded } =
+        this.appendCityInfoToFirstItem(r);
+      if (recentCityInfoAdded) {
+        r = modifiedR;
+        cityInfoAdded = true;
+      }
+    }
+
+    // If cityInfo not added to recent, try cache
+    let cForDisplay = c;
+    if (!appendCityInfoTry && c && c.length > 0 && this.cityInfo) {
+      appendCityInfoTry = true;
+      const { items: modifiedC, cityInfoAdded: cacheCityInfoAdded } =
+        this.appendCityInfoToFirstItem(c);
+      if (cacheCityInfoAdded) {
+        cForDisplay = modifiedC;
+        cityInfoAdded = true;
+      }
+    }
+
+    var rnc = r.concat(cForDisplay);
+    if (rnc && rnc.length) {
+      this.items = rnc;
+      this.renderResults("recentPlusCache");
+    } else {
+      this.hide();
+    }
+
+    // Fetch suggestions from API if no exact cache match
+    if (!exactMatchInCache) {
+      var apiResult = SUtils.arrToSug(await this.onQuery(this.val));
+      let apiResultForDisplay = apiResult;
+
+      // If cityInfo not added to recent or cache, try apiResult
+      if (
+        !appendCityInfoTry &&
+        apiResult &&
+        apiResult.length > 0 &&
+        this.cityInfo
+      ) {
+        appendCityInfoTry = true;
+        const { items: modifiedApiResult, cityInfoAdded: apiCityInfoAdded } =
+          this.appendCityInfoToFirstItem(apiResult);
+        if (apiCityInfoAdded) {
+          apiResultForDisplay = modifiedApiResult;
+        }
+      }
+
+      this.items = [...this.items, ...apiResultForDisplay];
+      this.cache.setCache({ value: q, context: this.opt.context }, [
+        ...c,
+        ...apiResult,
+      ]);
+      this.renderResults("apiResults");
+    }
+  }
+
+  /**
+   * Handle generic query logic for other suggester types
+   */
+  async handleGenericQuery(q) {
+    // Check for static suggestions
+    if (this.opt.suggestions) {
+      this.items = SUtils.match(q, SUtils.arrToSug(this.opt.suggestions));
+      this.renderResults("static");
+      return;
+    }
+
+    // Fetch from local sources (cache and localStorage)
+    let [r, c, exactMatchInCache] = await this.fetchLocal(q);
+    var rnc = r.concat(c);
+
+    if (rnc && rnc.length) {
+      this.items = rnc;
+      this.renderResults("recentPlusCache");
+    } else {
+      this.hide(false);
+    }
+
+    // Fetch suggestions from API if no exact cache match
+    if (!exactMatchInCache) {
+      var apiResult = SUtils.arrToSug(await this.onQuery(this.val));
+
+      // Special handling for country type - extract country array from response
+      if (this.opt.type === "country" && apiResult.country) {
+        apiResult = apiResult.country;
+      }
+
+      this.items = [...this.items, ...apiResult];
+      this.cache.setCache({ value: q, context: this.opt.context }, [
+        ...c,
+        ...apiResult,
+      ]);
+      this.renderResults("apiResults");
+    }
+  }
+
+  async fetchLocal(val) {
+    let [c, exactMatchInCache] = this.cache.getMatchedFromCahe({
+      value: val,
+      context: this.opt.context,
+    });
+
+    // Determine which key to use based on sellerId presence
+    let key = "";
+    if (this.opt.type == "product") {
+      if (this.opt.context.sellerId) {
+        key = "cntxt_sell";
+      } else {
+        key = "keyw_data";
+      }
+    }
+
+    let local = this.recent(key);
+
+    // For product + sellerId, use both contextual seller data and blsearches (from ims)
+    let blSug = [];
+    if (this.opt.type === "product" && this.opt.context.sellerId) {
+      // Load contextual seller suggestions for this seller
+      var contextualData = this.getContextualSellerData(
+        this.opt.context.sellerId
+      );
+
+      // If no data or expired, initialize it
+      if (
+        !contextualData ||
+        (contextualData.exp_date && this.isExpired(contextualData.exp_date))
+      ) {
+        contextualData = await this.initializeContextualSellerData();
+      }
+
+      if (contextualData && contextualData.data && contextualData.data.sugg) {
+        local = contextualData.data.sugg;
+        local = SUtils.arrToSug(local);
+      } else {
+        local = [];
+      }
+
+      // Load blsearches from IMStore under ims
+      try {
+        const bl = IMStore.getData("ims", "blsearches") || [];
+        // Normalize to suggestions
+        blSug = SUtils.arrToSug(bl).map((i) => {
+          // align with keyw_data normalization (lowercase label/value)
+          let label = (i.label || i.value || "").toLowerCase();
+          let value = (i.value || i.label || "").toLowerCase();
+          return {
+            label,
+            value,
+            type: i.type || "def",
+            cls: "blrcnt",
+            data: { ...(i.data || {}), source: "blsearches" },
+          };
+        });
+      } catch (e) {
+        blSug = [];
+      }
+    }
+
+    // there can be same item multiple time in local storage
+    local = SUtils.removeDuplicateLabels(local);
+
+    // Build recent list:
+    // - If product+sellerId: blsearches (matched, capped 5) + contextual seller (matched)
+    // - Else: existing behavior
+    let r;
+    if (this.opt.type === "product" && this.opt.context.sellerId) {
+      const rBl = SUtils.match(val, SUtils.localToSug(blSug));
+      const rCtx = SUtils.match(val, SUtils.localToSug(local));
+      r = SUtils.removeDuplicateLabels([...rBl, ...rCtx]);
+    } else {
+      r = SUtils.match(val, SUtils.localToSug(local));
+    }
+
+    return [r, c, exactMatchInCache];
+  }
+
+  // this is a helper function of "query()". Generic functionality is written in "query()". functionality specific to product suggestions is written here.
+  async onQuery(val) {
+    try {
+      const q = this.val.trim().toLowerCase();
+      // create API URL parameters
+      let urlParams = "";
+      const contextUrlParams = { ...this.opt.context, ...this.opt.urlParams };
+
+      // Add usr_ct_name parameter for location type with defaultCities
+      if (
+        this.opt.type === "location" &&
+        this.opt.defaultCities &&
+        this.opt.defaultCities.length > 0
+      ) {
+        // Add the first default city as usr_ct_name parameter
+        const firstDefaultCity =
+          typeof this.opt.defaultCities[0] === "string"
+            ? this.opt.defaultCities[0]
+            : this.opt.defaultCities[0].value ||
+            this.opt.defaultCities[0].label;
+        contextUrlParams.usr_ct_name = firstDefaultCity;
+      }
+
+      for (let k in contextUrlParams) {
+        var v = contextUrlParams[k];
+        // let v = this.opt.context[k];
+        // if (v) {
+        // TODO: temporary hardcoding for context
+        if (k == "mcat" || k == "cat") {
+          k = k + "id";
+        }
+        if (k == "display_seperator") {
+          urlParams += `&${encodeURIComponent(k)}=${v}`;
+        } else {
+          urlParams += `&${encodeURIComponent(k)}=${encodeURIComponent(v)}`;
+        }
+      }
+
+      /** if(q.length + urlParams.length == 0) {
+        // TODO: we need to allow 0 q.length for default contextual suggestions
+        return [];
+      }**/
+
+      const resp = await fetch(
+        `${this.opt.apiUrl}?q=${q}${urlParams}&tag=suggestions&limit=40&type=${this.opt.type}&v=412`
+      );
+      let res = await resp.json();
+
+      // Handle both old and new API response formats
+      if (this.opt.apiArrayKey) {
+        res = res[this.opt.apiArrayKey] || [];
+      } else if (res.recommended) {
+        // New API format uses "recommended" key
+        res = res.recommended;
+      } else if (res.product) {
+        // Old API format uses "product" key
+        res = res.product;
+      } else {
+        res = [];
+      }
+
+      // Special handling for country type - return the full response as is
+      // The country API returns data in a different format: {"country": [...]}
+      // We'll handle the extraction in handleGenericQuery instead
+      return res;
+    } catch (e) {
+      console.error("Error in querying!");
+      return [];
+    }
+  }
+
+  createBox() {
+    if (this.box) return;
+
+    // Remove all existing suggestion boxes and dims for this element before initializing a new box
+    this.elId = this.el && this.el.id;
+    if (this.elId) {
+      document
+        .querySelectorAll(`.imas-${this.elId}`)
+        .forEach((el) => el.remove());
+      document
+        .querySelectorAll(`.sugg_dim.imas-${this.elId}`)
+        .forEach((el) => el.remove());
+    }
+
+    // Create the suggestion box
+    this.box = document.createElement("div");
+    this.box.classList.add("imas");
+    // Add unique class for this element
+    if (this.elId) {
+      this.box.classList.add(`imas-${this.elId}`);
+    }
+    // add auto complete class provided in opt
+    this.opt.autocompleteClass &&
+      this.box.classList.add(...this.opt.autocompleteClass.split(" "));
+
+    // Get position of input relative to the viewport
+    const rect = this.el.getBoundingClientRect();
+
+    let top = rect.top + rect.height + window.scrollY;
+    if (this.box.classList.contains("hd_ctfltr")) {
+      top -= 10;
+    }
+
+    // Apply styles to position the box absolutely on the page
+    Object.assign(this.box.style, {
+      position: "absolute",
+      width: `${rect.width}px`,
+      minWidth: "150px",
+      left: `${rect.left + window.scrollX}px`,
+      top: `${top}px`,
+      zIndex: 10000,
+      display: "block",
+    });
+
+    // Handle selection clicks
+    this.box.addEventListener("mousedown", (event) => {
+      // Handle .sIcon clicks (trigger same as .imas-item)
+      const icon = event.target.closest(".sIcon");
+      if (icon) {
+        const li = icon.closest("li");
+        if (li) {
+          const itemDiv = li.querySelector(".imas-item");
+          if (itemDiv) {
+            const idx = parseInt(itemDiv.dataset.index, 10);
+            this._debug("click:sIcon", { idx });
+            this.select(event, idx, false);
+          }
+        }
+        return;
+      }
+
+      // Handle .imas-item clicks (existing behavior)
+      const target = event.target.closest(".imas-item");
+      if (target) {
+        const idx = parseInt(target.dataset.index, 10);
+        this._debug("click:item", { idx });
+        this.select(event, idx, target.classList.contains("aico"));
+        return; // Add this return statement
+      }
+
+      // Handle .imas-aico clicks (copy-to-input behavior) - improved for mobile
+      const actionIcon = event.target.closest(".imas-aico");
+      if (actionIcon) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const dataValue = actionIcon.dataset.value;
+        this._debug("click:actionIcon:before", {
+          prevValue: this.el?.value,
+          newValue: dataValue,
+          prevValState: this.val,
+        });
+
+        // Keep the dropdown from hiding due to blur during this interaction
+        this.preventHide = true;
+
+        try {
+          // Focus first on mobile to avoid value being restored by the OS
+          this.el.focus({ preventScroll: true });
+        } catch (_) {
+          // Fallback for older browsers
+          this.el.focus();
+        }
+
+        // Set value and internal state
+        if (typeof dataValue !== "undefined") {
+          if (this.el.value !== dataValue) {
+            this.el.value = dataValue;
+          }
+          this.val = dataValue;
+
+          // Place caret at end if supported
+          try {
+            this.el.setSelectionRange(
+              this.el.value.length,
+              this.el.value.length
+            );
+          } catch (_) {
+            // No-op for inputs that don't support selection range
+          }
+
+          // Cancel any pending debounce
+          clearTimeout(this.req);
+
+          // Notify external listeners with a real input event
+          this._dispatchInputEvent();
+
+          // Trigger a fresh query for the new value
+          this.req = setTimeout(() => this.query(), this.opt.debounce);
+        }
+
+        // Allow hide again shortly after the interaction
+        setTimeout(() => {
+          this.preventHide = false;
+        }, 50);
+
+        this._debug("click:actionIcon:after", {
+          elValue: this.el?.value,
+          valState: this.val,
+        });
+        return;
+      }
+    });
+
+    // Append to the body to avoid layout issues with parent elements
+    document.body.appendChild(this.box);
+
+    // Create dimming element only for product suggester on the main search input
+    // Minimal change: only add dim when element id is exactly 'search_string'
+    if (this.opt.type == "product" && this.elId === "search_string") {
+      // create dimming element
+      this.dim = document.createElement("div");
+      this.dim.classList.add("sugg_dim");
+      if (this.elId) {
+        this.dim.classList.add(`imas-${this.elId}`);
+      }
+      document.body.appendChild(this.dim);
+    }
+  }
+
+  renderResults(type) {
+    // Check if we should render the categorized UI
+    const shouldRenderCategorized =
+      this.opt.categorizedUIEnabled === true &&
+      this.opt.type === "product" &&
+      this.opt.context.sellerId &&
+      this.val.trim() === "";
+
+    if (shouldRenderCategorized) {
+      return this.renderCategorizedResults();
+    }
+
+    if (!this.box) {
+      this.createBox();
+    }
+
+    // Check if input value length is sufficient to display suggestions
+    if (this.val.length < this.opt.minStringLengthToDisplaySuggestion) {
+      this.hide();
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    const ul = document.createElement("ul");
+    ul.classList.add("imas");
+    fragment.appendChild(ul);
+
+    let items = SUtils.removeDuplicateLabels(this.items);
+    items = items.slice(0, this.opt.suggestionCount);
+
+    // Ensure shownItems contain capitalized values when frstcapcase is enabled
+    if (this.opt.frstcapcase === 1) {
+      items = items.map((it) => ({
+        ...it,
+        label: this.capitalizeFirstLetter(it.label),
+        value: this.capitalizeFirstLetter(it.value),
+      }));
+    }
+
+    this.shownItems = items;
+    // Render new suggestions
+    items.forEach((item, idx) => {
+      const li = document.createElement("li");
+      const div = document.createElement("div");
+
+      div.classList.add("imas-item");
+      div.classList.add("imas-text");
+
+      if (this.opt.type == "location") {
+        div.classList.add("imas-city-text");
+        if (item.value === "Use my location") {
+          div.classList.add("use-my-location");
+        }
+      }
+
+      div.dataset.value = item.value; // Store value
+      // div.dataset.value = this.highlightString(this.val, item.value, "reverse");
+      div.dataset.index = idx; // Store the index for event delegation
+      div.innerHTML = this.highlightString(item.label, this.val, "simple");
+      // if (idx === this.cur) {
+      //   div.classList.add("imas-sel");
+      // }
+
+      var chkFrMb = this.isMobileTab();
+
+      (this.opt.type == "product" || this.opt.type === "location") &&
+        li.appendChild(this.getIconHTML(item, chkFrMb));
+
+      li.appendChild(div);
+
+      const actionIco = document.createElement("i");
+      actionIco.classList.add("imas-aico");
+      actionIco.dataset.value = item.value;
+      actionIco.dataset.index = idx;
+
+      if (item.type) {
+        actionIco.classList.add("type-" + item.type);
+      }
+      li.appendChild(actionIco);
+
+      ul.appendChild(li);
+    });
+
+    this.box.innerHTML = ""; // Clear existing content
+    this.box.appendChild(fragment);
+
+    if (this._ga == "11" && this.shownItems.length > 0) {
+      const end = performance.now();
+      var inputToRenderInMs = end - this.start;
+      imgtm.push({
+        event: "IMEvent",
+        eventCategory: "Autosuggest",
+        eventAction: `inputToRender-${type}`,
+        eventLabel: window.location.href,
+        eventValue: inputToRenderInMs,
+      });
+    }
+  }
+
+  renderCategorizedResults() {
+    console.log("Rendering categorized results");
+    if (!this.box) {
+      this.createBox();
+    }
+
+    // Check if input value length is sufficient to display suggestions
+    if (this.val.length < this.opt.minStringLengthToDisplaySuggestion) {
+      this.hide();
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    const container = document.createElement("div");
+    container.classList.add("imas-categorized-suggestions");
+    fragment.appendChild(container);
+
+    // Get recent searches using only blsearches-derived items (cls === "blrcnt")
+    let recentItems = [];
+    if (this.opt.type === "product" && this.opt.context.sellerId) {
+      // Filter only items coming from blsearches and cap to 10 for UI
+      recentItems = this.items.filter((it) => it.cls === "blrcnt").slice(0, 10);
+    }
+
+    // Add recent searches section if we have recent items
+    if (recentItems.length > 0) {
+      const recentContainer = document.createElement("div");
+      recentContainer.className = "recent-searches";
+
+      const recentTitle = document.createElement("div");
+      recentTitle.className = "recent-searches-title";
+      recentTitle.textContent = "Recent Searches";
+      recentContainer.appendChild(recentTitle);
+
+      const recentList = document.createElement("div");
+      recentList.className = "recent-searches-list";
+
+      recentItems.forEach((item, idx) => {
+        const recentItem = document.createElement("span");
+        recentItem.className = "recent-search-item";
+        recentItem.textContent = item.label;
+        recentItem.dataset.index = idx;
+        recentItem.dataset.type = "recent";
+        recentList.appendChild(recentItem);
+      });
+
+      recentContainer.appendChild(recentList);
+      container.appendChild(recentContainer);
+    }
+
+    // For empty input with sellerId, use all items with group data
+    // Otherwise, use shownItems for filtering
+    let itemsToCategorize;
+    // For empty input, use all items that have group data
+    itemsToCategorize = this.items.filter(
+      (item) => item.data && item.data.group
+    );
+
+    console.log("Items to categorize:", itemsToCategorize);
+
+    // Group items by category
+    const categories = {};
+    itemsToCategorize.forEach((item, index) => {
+      // Only include items that have group data
+      if (item.data && item.data.group) {
+        const group = item.data.group;
+        if (!categories[group]) {
+          categories[group] = [];
+        }
+        // Store the original index for selection handling
+        item.originalIndex = index;
+        categories[group].push(item);
+      }
+    });
+
+    console.log("Categories:", categories);
+
+    // Sort categories by group_priority and create sections
+    Object.keys(categories)
+      .sort((a, b) => {
+        const priorityA = categories[a][0].data.group_priority || 9999;
+        const priorityB = categories[b][0].data.group_priority || 9999;
+        return priorityA - priorityB;
+      })
+      .forEach((group) => {
+        const categoryContainer = document.createElement("div");
+        categoryContainer.className = "category-container";
+
+        const categoryTitle = document.createElement("div");
+        categoryTitle.className = "category-title";
+        categoryTitle.textContent = group;
+        categoryContainer.appendChild(categoryTitle);
+
+        const categoryList = document.createElement("div");
+        categoryList.className = "category-list";
+
+        categories[group].forEach((item) => {
+          const listItem = document.createElement("span");
+          listItem.className = "category-item";
+          listItem.textContent = item.label;
+          listItem.dataset.index = item.originalIndex;
+          listItem.dataset.type = "category";
+          categoryList.appendChild(listItem);
+        });
+
+        categoryContainer.appendChild(categoryList);
+        container.appendChild(categoryContainer);
+      });
+
+    this.box.innerHTML = ""; // Clear existing content
+    this.box.appendChild(fragment);
+
+    // Remove any existing listener first to prevent duplicates (remove both click and mousedown if present)
+    if (this.box.categorizedClickListener) {
+      this.box.removeEventListener("click", this.box.categorizedClickListener);
+      this.box.removeEventListener(
+        "mousedown",
+        this.box.categorizedClickListener
+      );
+    }
+
+    // Store the listener function so we can remove it later
+    this.box.categorizedClickListener = (event) => {
+      const target = event.target.closest(
+        ".recent-search-item, .category-item"
+      );
+      if (target) {
+        // Prevent other click/blur handlers from running
+        if (event.preventDefault) event.preventDefault();
+        if (event.stopPropagation) event.stopPropagation();
+
+        const index = parseInt(target.dataset.index, 10);
+        const type = target.dataset.type;
+        const item =
+          type === "recent" ? recentItems[index] : itemsToCategorize[index];
+
+        if (item) {
+          // Create a proper event object
+          const fakeEvent = {
+            handleObj: { origType: "click" },
+            target: target,
+            // indicate that this selection originated from the categorized mega menu
+            categorizedSource: type, // 'category' or 'recent'
+            preventDefault: function () { },
+            stopPropagation: function () { },
+          };
+
+          // Find the item in shownItems to get its actual index
+          const itemIndex = this.shownItems.findIndex(
+            (shownItem) => shownItem.value === item.value
+          );
+
+          if (itemIndex !== -1) {
+            this.select(fakeEvent, itemIndex, false, item.value);
+          } else {
+            // If not found, add to shownItems and use new index
+            this.shownItems.push(item);
+            const newIndex = this.shownItems.length - 1;
+            this.select(fakeEvent, newIndex, false, item.value);
+          }
+        }
+      }
+    };
+
+    // Add the listener for both mousedown and click so selection is handled before other click-based hide handlers.
+    // mousedown fires earlier (before focus/blur), avoiding race conditions where the dropdown is hidden before selection.
+    this.box.addEventListener("mousedown", this.box.categorizedClickListener);
+    this.box.addEventListener("click", this.box.categorizedClickListener);
+  }
+
+  async initialCountryRender(iso) {
+    var q = "";
+    var apiResult = SUtils.arrToSug(await this.onQuery(this.val));
+    this.items = [...this.items, ...apiResult];
+    this.cache.setCache({ value: q, context: this.opt.context }, apiResult);
+    const match = this.items.find((item) => item.data.iso === iso);
+    if (match) {
+      // console.log("Match found:", match);
+    } else {
+      // console.log("No match found.");
+    }
+    const html = `<dt>
+                      <a>
+                          <span style="background-position: 0px -${11 * match["data"]["icon_order"]
+      }px;"></span>
+                          <div class="as_arrow"></div>
+                      </a><span class="value" style="display: inline-block;"></span>
+                  </dt>
+                `;
+    this.el.innerHTML = html;
+    var actionIco = undefined;
+    var e = undefined;
+    this.opt.onSelect(e, match, actionIco);
+  }
+
+  createCountryListContainer() {
+    const dd = document.createElement("dd");
+    const ul = document.createElement("ul");
+    ul.className = "country_list";
+    dd.appendChild(ul);
+    return dd;
+  }
+
+  createCountryListItem(nameWithCode, y, idx) {
+    const li = document.createElement("li");
+    li.className = "country_list_item";
+    li.dataset.val;
+    const span = document.createElement("span");
+    span.style.backgroundPosition = `0px -${11 * y}px`;
+
+    const a = document.createElement("a");
+    a.textContent = ` ${nameWithCode}`;
+
+    li.dataset.index = idx;
+    li.appendChild(span);
+    li.appendChild(a);
+    return li;
+  }
+
+  populateCountryListContainer(items) {
+    const fragment = document.createDocumentFragment();
+    // Populate it with li elements
+    items.forEach((item, idx) => {
+      var countryListItem = this.createCountryListItem(
+        item.label,
+        item.data.icon_order,
+        idx
+      );
+      fragment.appendChild(countryListItem);
+    });
+
+    this.dropdown.querySelector(".country_list").innerHTML = "";
+    this.dropdown.querySelector(".country_list").appendChild(fragment);
+  }
+
+  async renderDropdown() {
+    if (!this.dropdown) {
+      this.dropdown = this.createCountryListContainer();
+    }
+
+    // Handle selection clicks
+    this.dropdown.addEventListener("mousedown", (event) => {
+      const target = event.target.closest(".country_list_item");
+      if (target) {
+        const idx = parseInt(target.dataset.index, 10);
+        // console.log("index is ", idx);
+        this.select(event, idx, target.classList.contains("aico"));
+      }
+    });
+
+    const items = SUtils.removeDuplicateLabels(this.items);
+    this.shownItems = items;
+
+    this.populateCountryListContainer(items);
+    this.el.appendChild(this.dropdown);
+  }
+
+  highlightString(input, pattern, mode) {
+    // Skip if pattern is null, undefined, empty, or just whitespace
+    if (!pattern || /^\s*$/.test(pattern)) {
+      return `<b>${input}</b>`;
+    }
+
+    // If pattern is string, escape it and wrap it in a capturing group
+    const regex =
+      pattern instanceof RegExp
+        ? pattern
+        : new RegExp(`(${this.escapeRegExp(pattern)})`, "gi"); // Use "g" for all matches
+
+    if (mode === "reverse") {
+      return input.replace(regex, "<b>$1</b>");
+    } else {
+      return "<b>" + input.replace(regex, "</b>$1<b>") + "</b>";
+    }
+  }
+
+  escapeRegExp(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  isMobileTab() {
+    return /Mobi|Android|iPhone|iPad|iPod|Opera Mini|IEMobile/i.test(
+      navigator.userAgent
+    );
+  }
+
+  //REVIEW - from where chkFrMb is set
+  getIconHTML(i, chkFrMb) {
+    const wrapper = document.createElement("span");
+    wrapper.style.position = "relative";
+    wrapper.style.top = "-2px";
+    wrapper.classList.add();
+
+    const isMobileHost = window.location.host.match(/m\.indiamart\.com/);
+    const isMobile = chkFrMb || isMobileHost;
+    const cls = i.cls || "";
+    const typeData = i?.data?.type_data;
+
+    const hasValue = (val) => typeof val !== "undefined" && val !== "";
+    if (this.opt.type == "product") {
+      if (!isMobile) {
+        if (hasValue(cls) && (cls === "rcnt" || cls === "blrcnt")) {
+          // Only explicit recents (rcnt/blrcnt) get the recent icon
+          wrapper.innerHTML = '<i class="sIcon rcnt"></i>';
+        } else if (typeData == "2") {
+          wrapper.innerHTML = '<i class="sIcon pplr"></i>';
+        } else {
+          wrapper.innerHTML = '<i class="sIcon nrml"></i>';
+        }
+      } else {
+        if (hasValue(cls) && cls === "rcnt") {
+          wrapper.innerHTML = '<i class="sIcon rcnt"></i>';
+        } else if (
+          (hasValue(cls) && cls === "topsearches") ||
+          typeData == "2"
+        ) {
+          wrapper.innerHTML = '<i class="sIcon pplr"></i>';
+        } else {
+          wrapper.innerHTML = '<i class="sIcon nrml"></i>';
+        }
+      }
+    } else if (this.opt.type == "location") {
+      var locationSVG = `
+            <svg
+            class = "useMyLocation
+              width="15px"
+              height="15px"
+              viewBox="0 0 24 24"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <g id="SVGRepo_bgCarrier" stroke-width="0"></g>
+              <g
+                id="SVGRepo_tracerCarrier"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              ></g>
+              <g id="SVGRepo_iconCarrier">
+                {" "}
+                <path
+                  fill-rule="evenodd"
+                  clip-rule="evenodd"
+                  d="M12 16.5017C14.4853 16.5017 16.5 14.487 16.5 12.0017C16.5 9.5164 14.4853 7.50168 12 7.50168C9.51472 7.50168 7.5 9.5164 7.5 12.0017C7.5 14.487 9.51472 16.5017 12 16.5017ZM12 14.5034C10.6184 14.5034 9.49832 13.3833 9.49832 12.0017C9.49832 10.62 10.6184 9.5 12 9.5C13.3816 9.5 14.5017 10.62 14.5017 12.0017C14.5017 13.3833 13.3816 14.5034 12 14.5034Z"
+                  fill="#5a5a5b"
+                ></path>{" "}
+                <path
+                  fill-rule="evenodd"
+                  clip-rule="evenodd"
+                  d="M11 1C11 0.447715 11.4477 0 12 0C12.5523 0 13 0.447715 13 1V2.04938C17.7244 2.51844 21.4816 6.27558 21.9506 11H23C23.5523 11 24 11.4477 24 12C24 12.5523 23.5523 13 23 13H21.9506C21.4816 17.7244 17.7244 21.4816 13 21.9506V23C13 23.5523 12.5523 24 12 24C11.4477 24 11 23.5523 11 23V21.9506C6.27558 21.4816 2.51844 17.7244 2.04938 13H1C0.447715 13 0 12.5523 0 12C-1.19209e-07 11.4477 0.447715 11 1 11H2.04938C2.51844 6.27558 6.27558 2.51844 11 2.04938V1ZM12 20.0016C7.58083 20.0016 3.99839 16.4192 3.99839 12C3.99839 7.58083 7.58083 3.99839 12 3.99839C16.4192 3.99839 20.0016 7.58083 20.0016 12C20.0016 16.4192 16.4192 20.0016 12 20.0016Z"
+                  fill="#5a5a5b"
+                ></path>{" "}
+              </g>
+            </svg>`;
+      if (cls === "use-my-location") {
+        wrapper.innerHTML = locationSVG;
+      }
+    }
+
+    return wrapper;
+  }
+
+  navigate(direction, e) {
+    e.preventDefault();
+
+    // Remove the previous item's highlight
+    const prev = this.box.querySelector(`ul > li:nth-child(${this.cur + 1})`);
+    if (prev) prev.classList.remove("imas-sel");
+    // Increment the cursor and highlight the next item
+    this.cur =
+      (this.cur + direction + Math.min(this.shownItems.length, 10)) %
+      Math.min(this.shownItems.length, 10);
+    this.el.value = this.shownItems[this.cur]?.value;
+    this.el.label = this.shownItems[this.cur]?.label;
+    const next = this.box.querySelector(`ul > li:nth-child(${this.cur + 1})`);
+    if (next) next.classList.add("imas-sel");
+  }
+
+  // Helper function to update URL parameters
+  updateUrlParameter(param, value) {
+    const url = new URL(window.location.href);
+    url.searchParams.set(param, value);
+    window.history.replaceState({}, "", url.toString());
+  }
+
+  // third argument "action" will be true when the user has clicked on the action icon (on the right) instead of the suggestion text
+  // fourth argument "dataValue" is the specific value to set when action icon is clicked
+  select(e, idx, actionIco, dataValue) {
+    this._debug("select:called", { e: !!e, idx, actionIco, dataValue });
+
+    let selectedItem;
+
+    // First, try to get the item by index if valid
+    if (idx >= 0 && idx < this.shownItems.length) {
+      selectedItem = this.shownItems[idx];
+      this._debug("select:foundByIndex", { selectedItem });
+    }
+
+    // If not found by index and dataValue is provided, try to find by value
+    if (!selectedItem && dataValue) {
+      selectedItem = this.shownItems.find((item) => item.value === dataValue);
+      this._debug("select:foundByValue", { selectedItem, dataValue });
+    }
+
+    // If we still don't have an item, return early
+    if (!selectedItem) {
+      return;
+    }
+
+    // Set flag to indicate an item was selected
+    this.itemSelected = true;
+
+    if (this.opt.type === "location" && selectedItem.isMyLocation) {
+      // Handle "Use my location" selection
+      this.updateUrlParameter("suggnearme", "true");
+
+      if (this.opt.useMyLocation) {
+        const useMyLocationElement = document.getElementById(
+          this.opt.useMyLocation
+        );
+        if (useMyLocationElement) {
+          useMyLocationElement.click();
+        }
+      }
+      this.hide();
+      return;
+    }
+
+    this.el.value = selectedItem.value;
+    this.el.label = selectedItem.label;
+
+    // Handle URL parameter updates for location type
+    if (this.opt.type === "location") {
+      // Compute 1-based position: prefer idx when valid, otherwise find the item
+      let pos = 1;
+      if (typeof idx === "number" && idx >= 0 && idx < this.shownItems.length) {
+        pos = idx + 1;
+      } else {
+        const found = this.shownItems.findIndex(
+          (i) => i.value === (selectedItem.value || "")
+        );
+        pos = found !== -1 ? found + 1 : 1;
+      }
+
+      // Check if selectedItem matches any default city (normalized comparison)
+      let isDefaultCity = false;
+      if (this.opt.defaultCities && this.opt.defaultCities.length) {
+        const selVal = (selectedItem.value || "").toString().toLowerCase();
+        isDefaultCity = this.opt.defaultCities.some((city) => {
+          const cityVal =
+            typeof city === "string" ? city : city.value || city.label || "";
+          return cityVal.toString().toLowerCase() === selVal;
+        });
+      }
+
+      const prefix = isDefaultCity ? "as-userCity" : "as-suggcity";
+      // Only add c_src for location suggester on the specific directory search page
+      try {
+        const hostname = (window.location.hostname || "").toLowerCase();
+        const pathname = (window.location.pathname || "").toLowerCase();
+        if (hostname === "dir.indiamart.com" && pathname === "/search.mp") {
+          this.updateUrlParameter("c_src", `${prefix}|pos=${pos}`);
+        } else {
+          this._debug("select:c_src:skipped", { hostname, pathname });
+        }
+      } catch (e) {
+        // If any error occurs while checking location, do not add c_src to avoid breaking other pages
+        this._debug("select:c_src:error", e);
+      }
+    }
+
+    var key;
+    if (this.opt.type == "product") {
+      key = "keyw_data";
+    }
+
+    if (key == "keyw_data") {
+      // var selectedItemData = [
+      //   {
+      //     DT: instdate(),
+      //     id: this.el.value,
+      //     value: this.el.value,
+      //     label: this.el.label,
+      //     cls: "rcnt",
+      //   },
+      // ];
+      // this.recent({
+      //   keyw_data: selectedItemData,
+      // });
+    }
+    if (this.opt.onSelect) {
+      let clonedEvent = null;
+      try {
+        clonedEvent = this._cloneEventForSelect(e);
+      } catch (_) {
+        // If cloning fails, we'll use the original event e
+      }
+      let eventForSelect = clonedEvent || e || null;
+      if (!eventForSelect) {
+        try {
+          eventForSelect = new Event("click", {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+          });
+          Suggester._overrideEventTargets(eventForSelect, this.el);
+        } catch (_) {
+          eventForSelect = null;
+        }
+      }
+
+      if (eventForSelect) {
+        try {
+          eventForSelect.handleObj = { origType: "click" };
+        } catch (_) {
+          eventForSelect.handleObj = { origType: "click" };
+        }
+        if (e && e.categorizedSource && !eventForSelect.categorizedSource) {
+          try {
+            eventForSelect.categorizedSource = e.categorizedSource;
+          } catch (_) { }
+        }
+      }
+
+      // Use the selectedItem we have instead of this.shownItems[idx]
+      var item = { ...selectedItem };
+      this._debug("select:processing", { item, type: this.opt.type });
+
+      if (this.opt.type == "product") {
+        // Compute the position in shownItems
+        const pos =
+          this.shownItems.findIndex((i) => i.value === item.value) + 1;
+        var kwd = this.val;
+        var kwdcount = kwd.split(" ").length;
+        if (kwd.trim() == "") {
+          kwdcount = 0;
+        }
+        var catid = this.opt.context.cat ?? "";
+        var mcatid = this.opt.context.mcat ?? "";
+        var kwd_len = this.val.trim().length;
+        var src;
+        const cls = item.cls || ""; // Use item.cls instead of this.shownItems[idx].cls
+        const typeData = item.data?.type_data;
+
+        const hasValue = (val) => typeof val !== "undefined" && val !== "";
+        // If selection originated from categorized mega menu, prefer special tracking
+        if (e && e.categorizedSource === "category") {
+          // Suggestion picked from categorized suggestions (mega menu)
+          src = "as-recom";
+        } else if (e && e.categorizedSource === "recent") {
+          // Recent search picked from categorized recent searches
+          src = "as-blrcnt-recom";
+        } else {
+          // prioritize blsearches tracking
+          if (cls === "blrcnt" || item.data?.source === "blsearches") {
+            src = "as-blrcnt";
+          } else if (hasValue(cls) && (cls === "rcnt" || cls === "recent")) {
+            // keep legacy rcnt path for non-blsearches recents
+            src = "as-rcnt";
+          } else if (typeData == "2") {
+            src = "as-popular";
+          } else if (typeData == "4") {
+            src = "as-comp";
+          } else if (typeData == "3") {
+            src = "as-kwd";
+          } else {
+            src = "as-context";
+          }
+        }
+        // If input is empty, older logic forced non-recent non-blrcnt sources to as-default.
+        // Preserve our new categorized tags (as-recom, as-bl-recom) so they are not overridden.
+        if (
+          src != "as-rcnt" &&
+          src != "as-blrcnt" &&
+          src != "as-recom" &&
+          src != "as-blrcnt-recom" &&
+          this.val.trim().length == 0
+        ) {
+          src = "as-default";
+        }
+        var trackid = `${src}|kwd=${kwd}|pos=${pos}|cat=${catid}|mcat=${mcatid}|kwd_len=${kwd_len}|kwd_cnt=${kwdcount}`;
+        item["trackid"] = trackid;
+        item["askwdSel"] = 1;
+        console.log("Generated trackid:", trackid);
+      }
+      var ui = { item: item };
+      if (this.opt.type == "isd") {
+        ui = item;
+      }
+      this.hide(); // remove box and all after suggestion selected
+      this._debug("select:onSelect", {
+        selectedItem: ui,
+        actionIco,
+        eventType: eventForSelect ? eventForSelect.type : undefined,
+      });
+      this.opt.onSelect(eventForSelect, ui, actionIco);
+    }
+
+    this._debug("select:complete", {
+      finalValue: this.el.value,
+      finalLabel: this.el.label,
+    });
+  }
+
+  hide() {
+    // Determine whether to remove the dim based on whether it exists.
+    const removeDim = !!this.dim;
+    this._debug("hide:called", {
+      removeDim,
+      hasBox: !!this.box,
+      hasDim: !!this.dim,
+    });
+    this.items = [];
+    this.shownItems = [];
+    this.cur = this.opt.autoSelect ? 0 : -1;
+    if (this.box) {
+      this.box.remove(); // commenting this and setting display=none for debugging
+      // this.box.style.display = "none";
+      this.box = null;
+    }
+    if (removeDim) {
+      this.dim?.remove();
+      this.dim = null;
+    }
+    if (this.dropdown) {
+      this.dropdown.remove();
+      this.dropdown = null;
+    }
+  }
+
+  /** if you want to change the context of the suggester after it has been initialized, use this function.
+  context can be any of the following
+  mcatid
+  catid
+  city //TODO: to be implemented in location suggester. show nearby city from this city
+  state //TODO: to be implemented in location suggester. show primary cities from this state **/
+  setContext(c) {
+    this.opt.context = c;
+  }
+
+  recent(input) {
+    if (typeof input === "string") {
+      // Return requested key's value (e.g., 'keyw_data')
+      var x = IMStore.getData("ims", input) || [];
+      // Only sort for keyw_data, not for other keys like cntxt_sell
+      if (input === "keyw_data") {
+        // Filter out invalid entries where id is empty (id is mandatory)
+        x = x.filter((item) => {
+          return item.id && item.id.trim() !== "";
+        });
+        return x.sort((a, b) => b.DT.localeCompare(a.DT));
+      }
+      return x;
+    }
+    // SET mode: if input is an object with key: value[]
+    if (typeof input === "object" && input !== null) {
+      // Process all key-value pairs in the input object
+      Object.entries(input).forEach(([key, newItems]) => {
+        let existing = this.recent(key);
+        if (!Array.isArray(existing)) existing = [];
+        if (key == "keyw_data") {
+          // Special handling for keyw_data items
+          newItems = newItems.filter((obj) => {
+            // Filter out entries where id is empty or missing
+            return obj.id && obj.id.trim() !== "";
+          });
+
+          newItems.forEach((obj) => {
+            obj.cls = "rcnt";
+            if (obj.id) {
+              obj.id = obj.id.toLowerCase();
+              obj.id = obj.id.replace(/[^a-zA-Z0-9 .]/g, "");
+            }
+            if (obj.value) {
+              obj.value = obj.value.toLowerCase();
+              obj.value = obj.value.replace(/[^a-zA-Z0-9 .]/g, "");
+            } else {
+              obj.value = obj.id;
+            }
+            obj.label = obj.value;
+          });
+        }
+        // Append all new items that are not in existing
+        // Build a Set of existing values to detect duplicates
+        const existingValues = new Set(
+          existing.map((existingItem) => existingItem.value)
+        );
+
+        // Normalize newItems to always be an array
+        const newItemsArray = Array.isArray(newItems) ? newItems : [newItems];
+
+        // Filter out newItems that already exist
+        const uniqueNewItems = newItemsArray.filter((item) => {
+          // Handle both string and object items
+          const itemValue = typeof item === "string" ? item : item.value;
+          return !existingValues.has(itemValue);
+        });
+        existing.push(...uniqueNewItems); // Save using store.setData
+        IMStore.setData("ims", key, existing);
+
+        // Update context if setting 'cats' or 'mcats'
+        if (key === "cats" || key === "mcats") {
+          // Use the last value in the array for the context
+          if (existing.length > 0) {
+            const lastValue = existing[existing.length - 1];
+            if (key === "cats") {
+              this.opt.context.cat = lastValue;
+            } else if (key === "mcats") {
+              this.opt.context.mcat = lastValue;
+            }
+          }
+        }
+      });
+    }
+  }
+
+  recentNew(input) {
+    if (typeof input === "string") {
+      // GET mode unchanged
+      var x = IMStore.getData("ims", input) || [];
+      if (input === "keyw_data") {
+        x = x.filter((item) => {
+          return item.id && item.id.trim() !== "";
+        });
+        x.sort((a, b) => b.DT.localeCompare(a.DT));
+        return x;
+      }
+      return x;
+    }
+
+    // SET mode
+    if (typeof input === "object" && input !== null) {
+      Object.entries(input).forEach(([key, newItems]) => {
+        let existing = this.recentNew(key);
+        if (!Array.isArray(existing)) existing = [];
+
+        if (key == "keyw_data") {
+          const newItemsArray = Array.isArray(newItems) ? newItems : [newItems];
+
+          newItemsArray.forEach((newObj) => {
+            // Auto-add source if provided
+            if (newObj.source !== undefined) {
+              newObj.source = newObj.source;  // Preserve source
+            }
+
+            // Normalize for comparison
+            const normalizedId = (newObj.id || '').toLowerCase().replace(/[^a-zA-Z0-9 .]/g, "");
+            const normalizedFilters = JSON.stringify(newObj.filters || {});
+
+            // Find existing entry with SAME id AND SAME filters
+            const existingIndex = existing.findIndex((existingItem) => {
+              const existingId = (existingItem.id || '').toLowerCase().replace(/[^a-zA-Z0-9 .]/g, "");
+              const existingFilters = JSON.stringify(existingItem.filters || {});
+              return existingId === normalizedId && existingFilters === normalizedFilters;
+            });
+
+            if (existingIndex !== -1) {
+              // CASE 1: Exact match → UPDATE DT only
+              existing[existingIndex].DT = newObj.DT;
+              if (newObj.source !== undefined) {
+                existing[existingIndex].source = newObj.source;  // Update source too
+              }
+            } else {
+              // CASE 2: ADD NEW ENTRY
+              let obj = { ...newObj };
+              obj.cls = "rcnt";
+              obj.id = normalizedId;
+              if (obj.value) {
+                obj.value = obj.value.toLowerCase().replace(/[^a-zA-Z0-9 .]/g, "");
+              } else {
+                obj.value = obj.id;
+              }
+              obj.label = obj.value;
+              existing.push(obj);
+            }
+          });
+
+          existing.sort((a, b) => b.DT.localeCompare(a.DT));
+        } else {
+          // Non-keyw_data unchanged
+          const newItemsArray = Array.isArray(newItems) ? newItems : [newItems];
+          newItemsArray.forEach((newObj) => {
+            const itemValue = typeof newObj === "string" ? newObj : newObj.value;
+            const existingIndex = existing.findIndex(item => {
+              const existValue = typeof item === "string" ? item : item.value;
+              return existValue === itemValue;
+            });
+            if (existingIndex !== -1) {
+              existing[existingIndex] = { ...newObj };
+            } else {
+              existing.push(newObj);
+            }
+          });
+        }
+
+        IMStore.setData("ims", key, existing);
+
+        // Context updates unchanged
+        if (key === "cats" || key === "mcats") {
+          if (existing.length > 0) {
+            const lastValue = existing[existing.length - 1];
+            if (key === "cats") {
+              this.opt.context.cat = lastValue;
+            } else if (key === "mcats") {
+              this.opt.context.mcat = lastValue;
+            }
+          }
+        }
+      });
+    }
+  }
+}
+
+// match "q" in suggestions (value)
+class SUtils {
+  static match(q, list) {
+    q = q.toLowerCase();
+    return (list || []).filter((s) => {
+      const value = s.value.toLowerCase();
+      const words = value.split(/\s+/);
+      return (
+        value.startsWith(q) || words.some((word) => word.startsWith(q)) // word start match
+      );
+    });
+  }
+
+  static arrToSug(lst) {
+    if (!lst || !lst.length) {
+      return [];
+    }
+    // convert lst to "label", "value", "data" structure
+    if (typeof lst[0] === "string") {
+      lst = lst.map((i) => ({
+        label: i,
+        value: i,
+        type: "",
+        data: {},
+        cls: "unknown",
+      }));
+    } else if (typeof lst[0] === "object") {
+      // "value" is mandatory, nothing else is
+      lst = lst.map((i) => {
+        // Check if this is the new format (with group, group_priority, score)
+        if (i.group !== undefined) {
+          // Transform new format to expected format
+          return {
+            label: i.label,
+            value: i.value,
+            priority: i.priority,
+            cls: i.cls || "unknown",
+            data: {
+              type_data: "6", // Default value as in old format
+              sort_order: i.priority.toString(),
+              group: i.group,
+              group_priority: i.group_priority,
+              score: i.score,
+            },
+          };
+        } else {
+          // Already in expected format
+          return {
+            label: i.label || i.value,
+            value: i.value,
+            type: i.type || "def",
+            cls: i.cls || "unknown",
+            data: i.data || {},
+          };
+        }
+      });
+    }
+    return lst;
+  }
+
+  static removeDuplicateLabels(array) {
+    const seenLabels = new Set();
+    return array.filter((sug) => {
+      if (!seenLabels.has(sug.label)) {
+        seenLabels.add(sug.label);
+        return true;
+      }
+      return false;
+    });
+  }
+
+  /** no need to give support to backward compatibility because local storage format for product keywords and city keywords are different
+    - acceptable formats of local storage
+    format 1:
+      [
+        {label: "Diesel Generator", value: "Diesel Generator", data: {mcatid: "13467", DT:"202502130041", ...}},
+        ...
+      ]
+    	
+      "label": mandatory, else consider invalid value
+      "value": optional. defaults to label
+      "data": optional. remove key of not a value key/value object
+    format 2:
+      [
+        "diesel generator", // works as label and value both
+        ...
+      ]
+    format 3:
+      [
+        "diesel generator", // works as label and value both
+        {label: "Diesel Generator", value: "Diesel Generator", data: {mcatid: "13467", DT:"202502130041", ...}},
+        ...
+      ]
+      purpose of this format is only to save space where only list is strings is required.
+  **/
+  static sugToLocal(sugg) {
+    return sugg.map(
+      ({ label, value, data }) =>
+        (value != undefined && value != label) || data != undefined //// if there is a reason to store object
+          ? {
+            //// then store object
+            label: label,
+            ...(value !== undefined && { value }), // Include value only if it exists
+            ...(data !== undefined && { data }), // Include data only if it exists
+          }
+          : label //// else store string only
+    );
+  }
+
+  static localToSug(local) {
+    return local.map((s) =>
+      typeof s === "string" ? { label: s, value: s } : s
+    );
+  }
+
+  static dateYYYYMMDD() {
+    const date = new Date();
+    return date.toISOString().slice(0, 10).replace(/-/g, ""); // Formats YYYYMMDD
+  }
+}
+
+class Suggestion { }
+
+/**
+SuggestionCache stores the API suggestions for strings.
+ **Please note that these are not necessarily displayed as it is. display order will be decided later in renderResults where we may change ordering of recent or API suggestions.
+ - Value of the input box, referred as value in this paragraph, is to be checked for existence in this cache
+ - If exact string is present in the SuggestionCache
+  - display the cache as it is
+ - If exact string is not found in the SuggestionCache
+  - remove one character from value
+  - check if cache exist for remaining word
+  - if cache is present
+    - display it as it is
+  - if cache is not present
+    - keep removing characters one by one till we find an entry in cache
+
+Example of cache object
+cache = {
+  'api-<non-zero context field and ids>': {
+    <string>: [<list of suggestions>]
+  }
+}
+cache = {
+  'context-': {
+    'a': ['apple', 'avocado', 'apple pie', 'mango ale'],
+    'ap': ['apple', 'apple pie', 'apricot']
+  },
+  'context-catid87-mcatid-13487': {
+    'd': ['disel generator',...],
+    'di': [...]
+  }
+}
+
+in future we'll also use location in context
+cache = {
+  'context-': {
+    'a': ['apple', 'avocado', 'apple pie', 'mango ale'],
+    'ap': ['apple', 'apple pie', 'apricot']
+  },
+  'context-catid87-mcatid-13487-city34678': {
+    'd': ['disel generator',...],
+    'di': [...]
+  }
+}
+**/
+class SuggestionCache {
+  constructor(options) {
+    if (options && options.cache) {
+      this.cache = options.cache;
+    } else {
+      this.cache = {};
+    }
+  }
+
+  // input = {value: <string for suggestions>, context: <Suggester context (key value pair)>}
+  getMatchedFromCahe(input) {
+    // check cache for val and val substring key
+    // if val substring key found take matching ( Sutils.match) items from val substring list
+    // if val string key exactcly present take all items from val list
+    const key = SuggestionCache.getContextKey(input.context);
+    let v = input.value,
+      c = [];
+    var exactMatchInCache = false;
+    if (this.cache[key]) {
+      exactMatchInCache = true;
+      while (!(c = this.cache[key][v])) {
+        exactMatchInCache = false;
+        if (v.length == 0) {
+          break;
+        }
+        v = v.substring(0, v.length - 1);
+      }
+    }
+
+    // no matching Sutils.match required if exactMatch is found in cache
+    if (exactMatchInCache) {
+      return [c, exactMatchInCache];
+    } else {
+      return [SUtils.match(input.value, c), exactMatchInCache];
+    }
+  }
+
+  /**
+  suggestions may be fetched from API, static data or probably somewhere else, which may return simple array of string suggestions, array of objects or may be something else in future. however while storing it in cache, it should be stored in a single format, i.e. label/value/data format. it'll ease the coding efforts in reading the cache. we don't have to care the format which was returned by the suggestion source
+  suggestions = [{label:<displayable value>,value: <value>, data: <meta data of suggestion, if any>}, ...] **/
+  setCache(input, suggestions) {
+    if (!this.cache) {
+      this.cache = {};
+    }
+    const key = SuggestionCache.getContextKey(input.context);
+    if (!this.cache[key]) {
+      this.cache[key] = {};
+    }
+    this.cache[key][input.value] = SUtils.arrToSug(suggestions);
+  }
+
+  static getContextKey(context = {}) {
+    return (
+      "api-" +
+      Object.entries(context)
+        .filter(([key, value]) => value) // Keep only truthy values
+        .map(([key, value]) => `${key}-${value}`)
+        .join("--")
+    );
+  }
+}
+
+/**
+// use following to replace setTimeout for debounce earlier
+const debounce = (fn, delay) => {
+  let timeoutId;
+  return (...args) => {
+    clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => fn(...args), delay);
+  };
+};
+**/
+/** TODO: use MutationObserver to check input elements having attribute "suggester=true" and initialize Suggester on such elements.
+Low priority
+attributes of html element to arguments in suggester constructor to be mapped
+increase / decrease of parameters should be dynamic (validation of html elements should not be required)
+onSelect functionality / callback handling to be decided
+**/
+
+class IMStoreClass {
+  constructor(options = {}) {
+    if (IMStoreClass.instance) {
+      return IMStoreClass.instance;
+    }
+    IMStoreClass.instance = this;
+
+    this.domain = "utils.imimg.com";
+    if (
+      options.domain.includes("dev-") ||
+      options.domain.includes("localhost")
+    ) {
+      this.domain = "dev-utils.imimg.com";
+    }
+
+    this.localStorage = {};
+
+    this.receiveMessage = this.receiveMessage.bind(this);
+    // Add the event listener to the window
+    window.addEventListener("message", this.receiveMessage);
+
+    var url = `https://${this.domain}/storage/store-v18.html?s=20250201`;
+    var frameId = "storageFrame";
+    this.url = document.URL;
+    this.childURL = url;
+    var message = { modId: "*", key: "*", data: "*", url: this.url };
+    try {
+      const runCode = () => {
+        const ifrm = Object.assign(document.createElement("iframe"), {
+          src: url,
+          id: frameId,
+          name: "storageFrame",
+          style: "visibility:hidden;width:0;height:0;",
+        });
+
+        ifrm.addEventListener("load", () => {
+          this.msgHandler = ifrm.contentWindow;
+          this.msgHandler.postMessage(message, url);
+        });
+
+        document.body.appendChild(ifrm);
+      };
+
+      if (document.readyState === "loading") {
+        // DOM is still loading, wait for the DOMContentLoaded event
+        document.addEventListener("DOMContentLoaded", runCode);
+      } else {
+        // DOM is already ready, execute the code immediately
+        runCode();
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  /** Core getter/setter functions to read/write from/on localStorage.
+  No other function is supposed to directly interact with localStorage.
+  All the cross browser functionality is also supposed to be done here
+  Modid and key must be in lower case
+  **/
+  getData(modId, key) {
+    var x = (this.localStorage[modId] || "{}")[key] || [];
+    if (key == "keyw_data") {
+      x = x.filter(
+        (item) =>
+          typeof item === "object" && item !== null && !Array.isArray(item)
+      );
+      x.forEach((i) => {
+        if (!i.cls) {
+          i.cls = "rcnt";
+        }
+        if (i.id) {
+          i.id = i.id.toLowerCase();
+          // i.id = i.id.replace(/[^a-zA-Z0-9]/g, "");
+        }
+        if (i.label) {
+          i.label = i.label.toLowerCase();
+          // i.label = i.label.replace(/[^a-zA-Z0-9]/g, "");
+        } else {
+          i.label = i.id;
+        }
+        if (!i.value) {
+          i.value = i.id;
+        }
+      });
+    }
+    return x;
+  }
+
+  /** getData receives modid and key. Returns the data stored against key for mentioned modid.
+  Return type could be anything and it depends on what we have stored against a particular modid, key combination.
+  If Storage is not supported or modId/key is not defined it will return null value
+  **/
+  setData(modId, key, data) {
+    var msg = { modId: modId, key: key, data: data, url: this.url };
+    if (this.msgHandler && data) {
+      this.msgHandler.postMessage(msg, this.childURL);
+    }
+  }
+
+  receiveMessage(event) {
+    if (event.data) {
+      if (event.origin.match(/utils.imimg.com/g)) {
+        this.localStorage = JSON.parse(event.data);
+        Object.keys(this.localStorage).forEach((k) => {
+          this.localStorage[k] = JSON.parse(this.localStorage[k]);
+        });
+      }
+    }
+  }
+}
+
+// Shared IMStore instance (lazy initialized)
+let sharedIMStore = null;
+
+// Helper function to get or create the shared IMStore instance
+function getSharedIMStore() {
+  if (!sharedIMStore) {
+    sharedIMStore = new IMStoreClass({ domain: document.location.host });
+  }
+  return sharedIMStore;
+}
+
+const IMStore = getSharedIMStore();
+
+// TODO: only for compatibility testing
+// remove code below this and move to correct place, i.e. css files etc., before making it to production
+(function () {
+  let style = document.createElement("style");
+  style.type = "text/css";
+  style.innerHTML = `
+.imas {
+	background: #fff;
+	border-radius: 0 0 5px 5px;
+	border: 1px solid #ccc;
+	border-top: 0;
+	text-align: left;
+}
+.imas li {
+	display: flex;
+  line-height: 1 ;
+
+}
+.imas-item, .imas-tico, .imas-aico {
+	padding: 8px 4px 6px 0;
+	cursor: pointer;
+	display: flex;
+}
+.imas-text {
+  display : block;
+  text-indent: 5px;
+	flex: 1;
+  color: #0c0f71; 
+  font-family: Gotham, 'Helvetica Neue', Helvetica, Arial, sans-serif !important;
+  padding-left: 20px
+}
+
+.imas-city-text {
+  text-indent: inherit !important;
+  padding-left: 12px;
+  color: #0c0f71;
+  font-size: 14px;
+  line-height: 18px;
+}
+
+.imas-item:hover,
+.imas-tico:hover,
+.imas-aico:hover,
+.imas-sel {
+	background: #ededed;
+}
+
+.imas-city-text:hover {
+    background: #eaeaf4
+}
+
+
+.sIcon {
+    background: url(//utils.imimg.com/globalhf/hrd-sp-v19.png);
+    width: 20px;
+    height: 20px;
+    top: 6px;
+    left: 2px;
+    position: absolute;
+    padding-top: 4px;
+    z-index: 1;
+}
+
+i.sIcon.nrml {
+    background-position: -377px -138px;
+}
+
+i.sIcon.pplr {
+    background-position: -413px -136px;
+}
+
+i.sIcon.rcnt {
+    background-position: -341px -136px;
+}
+
+.select-imas {
+    position: absolute;
+    top:100px;
+     display:block;
+}
+
+
+#css for isd sugg
+.dropdown dt a span,
+.dropdown dd ul li span {
+  width: 16px;
+  height: 11px;
+  background: url(//utils.imimg.com/imsrchui/imgs/country-v5.png);
+}
+
+.dropdown dt a span {
+  cursor: pointer;
+  display: block;
+}
+
+.dropdown dt a span {
+  margin: 4px 3px;
+}
+
+.as_arrow {
+  position: relative;
+  top: 40%;
+  margin-top: -19px;
+  left: 24px;
+  width: 0;
+  height: 0;
+  border-left: 3px solid transparent;
+  border-right: 3px solid transparent;
+  border-top: 4px solid #555;
+}
+
+.value {
+  bottom: 5px;
+  left: 2px;
+  position: relative;
+  font-size: 14px;
+  font-family: Arial;
+}
+
+.dropdown dd ul li.selected {
+  background: #ddf;
+}
+
+.dropdown dd ul {
+  background: #ffffff none repeat scroll 0 0;
+  list-style: none;
+  padding: 5px;
+  position: absolute;
+  left: 0px;
+  top: 2px;
+  width: auto;
+  height: 155px;
+  overflow-y: scroll;
+  border: 1px solid #bdc7d8;
+}
+.dropdown dd {
+    position: relative;
+}
+
+.dropdown dd, .dropdown dt, .dropdown ul {
+    margin: 0px;
+    padding: 0px;
+}
+
+.dropdown dt a span, .dropdown dd ul li span {
+    width: 16px;
+    height: 11px;
+    background: url(//utils.imimg.com/imsrchui/imgs/country-v5.png);
+}
+
+.dropdown dd ul li span {
+    display: inline-block;
+}
+.dropdown dd ul li a {
+    color: black;
+    padding: 5px;
+    display: block;
+    display: inline-block;
+    cursor: pointer;
+    font-size: 14px;
+    font-family: arial;
+    text-decoration: none;
+}
+
+.dropdown dt a {
+    display: inline-block;
+    width: 35px;
+    height: 20px;
+}
+
+.sugg_dim {
+    background-color: rgba(0, 0, 0, 0.7);
+    z-index: 8;
+    display: block;
+    position: fixed;
+    top: 55px;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    margin: auto;
+}
+
+  .useMyLocation {
+    position: absolute;
+    top: 9px;
+    left: 6px;
+  } 
+
+  .use-my-location {
+    padding-left: 26px;
+  }
+
+
+  /* Make .imas-advanceProductSearch share styles with .imas-search_hme */
+  .imas-search_hme li div, .imas-advanceProductSearch li div   {
+    display: list-item;
+    text-align: inherit;
+    list-style: none;
+    cursor: pointer;
+    background: #fff;
+    position: relative;
+    font-family: arial;
+    padding: 0 10px !important;
+    }
+
+ .imas-search_hme li div, .imas-advanceProductSearch li div
+ {   font-family: arial !important;
+    font-size: 16px !important;
+    color: #333 !important;
+    padding: 11px 25px !important;
+    border-bottom: 1px solid #dddcdd !important;
+    display: block !important;
+    position: relative !important;
+}
+
+  .imas.imas-search_hme{
+    position: absolute !important;
+    width: 100% !important;
+    height:100% !important;
+    min-width: 150px !important;
+    left: 0px !important;
+    top: 58px !important;
+    z-index: 10000 !important;
+    display: block;
+    margin-top: 9px;
+    border: 0px;
+    border-radius: 0px;
+}
+.imas.imas-advanceProductSearch {
+    position: absolute !important;
+    height:100% !important;
+    min-width: 150px !important;
+    z-index: 10000 !important;
+    display: block;
+    border: 0px;
+    border-radius: 0px;
+}
+
+.imas-search_hme ul, .imas-advanceProductSearch ul {
+  border: 0px;
+  border-radius: 0px;
+  box-shadow: 0 10px 10px -9px hsla(0, 0%, 42%, .5);
+}
+
+.imas-search_hme .sIcon, .imas-advanceProductSearch .sIcon {
+    transform: scale(1.2); /* Zoom 1.2x */
+    top:8px;
+}
+
+.imas.imas-search_hme .imas-aico, .imas.imas-advanceProductSearch .imas-aico {
+    width: 30px;
+    background-image: url(https://utils.imimg.com/img/atSgstIcon.svg);
+    background-repeat: no-repeat !important;
+    height: 100%;
+    background-position: -110px 11px !important;
+    right: 12px;
+    position: absolute;
+    
+}
+
+.imas-search_hme li, .imas-advanceProductSearch li {
+  padding: 0 10px !important;
+  position: relative;
+}
+ 
+/* Categorized suggestions styles */
+.imas-categorized-suggestions {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.recent-searches {
+  padding: 10px;
+  border-bottom: 1px solid #eee;
+}
+
+.recent-searches-title {
+  font-weight: bold;
+  margin-bottom: 5px;
+}
+
+.recent-searches-list {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.recent-search-item, .category-item {
+  background-color: #f0f0f0;
+  padding: 5px 10px;
+  margin: 2px;
+  border-radius: 15px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.recent-search-item:hover, .category-item:hover {
+  background-color: #e0e0e0;
+}
+
+.category-container {
+  padding: 10px;
+  border-bottom: 1px solid #eee;
+}
+
+.category-title {
+  font-weight: bold;
+  margin-bottom: 5px;
+  color: #333;
+}
+
+.category-list {
+  display: flex;
+  flex-wrap: wrap;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+`;
+
+  document.getElementsByTagName("head")[0].appendChild(style);
+})();
+
+// console.log(store.getData("ims", "kwd_data"))
+function instdate() {
+  var dd = new Date();
+  var date_ins =
+    "" +
+    dd.getFullYear() +
+    (dd.getMonth() < 9 ? "0" + (dd.getMonth() + 1) : dd.getMonth() + 1) +
+    (dd.getDate() < 10 ? "0" + dd.getDate() : dd.getDate()) +
+    (dd.getHours() < 10 ? "0" + dd.getHours() : dd.getHours()) +
+    (dd.getMinutes() < 10 ? "0" + dd.getMinutes() : dd.getMinutes()) +
+    (dd.getSeconds() < 10 ? "0" + dd.getSeconds() : dd.getSeconds());
+  return date_ins;
+}
